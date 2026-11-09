@@ -26,12 +26,6 @@ from src.fastme_wrapper import run_fastme
 from src.ml_wrapper import run_msa_ml
 from src.topology_search import TreeScorer, hill_climb_search
 
-# Ensure stdout and stderr flush line-by-line even when redirected with nohup / file redirection
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(line_buffering=True)
-if hasattr(sys.stderr, "reconfigure"):
-    sys.stderr.reconfigure(line_buffering=True)
-
 
 def run_large_scale_benchmark(
     taxa_list: List[int] = [32, 64, 128],
@@ -145,9 +139,12 @@ def run_large_scale_benchmark(
                 out_str += f"MSA_ML={row.get('MSA_ML_nrf', -1):.3f} | "
                 out_str += f"NJ={row.get('Standard_NJ_nrf', -1):.3f} | "
                 out_str += f"BioNJ={row.get('BioNJ_nrf', -1):.3f} | "
+                out_str += f"FastME_SPR={row.get('FastME_SPR_nrf', -1):.3f} | "
                 out_str += f"AddNJ2={row.get('AddNJ2_nrf', -1):.3f}"
                 if "BioNJ_Add_NNI_nrf" in row:
-                    out_str += f" | BioNJ+NNI={row['BioNJ_Add_NNI_nrf']:.3f}"
+                    out_str += f" | BioNJ+AddNNI={row['BioNJ_Add_NNI_nrf']:.3f}"
+                if "AddNJ2_Add_NNI_nrf" in row:
+                    out_str += f" | AddNJ2+AddNNI={row['AddNJ2_Add_NNI_nrf']:.3f}"
                 print(out_str)
 
     df = pd.DataFrame(all_records)
@@ -168,22 +165,38 @@ def generate_large_scale_plots(df: pd.DataFrame, outdir: str = "results_large_sc
     labels = ["MSA + ML (FastTree)", "Standard NJ", "BioNJ", "FastME-SPR", "AddNJ2 (Proposed)"]
     colors = ["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd"]
 
+    # Optional NNI methods if evaluated
+    all_methods = list(core_methods)
+    all_labels = list(labels)
+    all_colors = list(colors)
+    if "BioNJ_Add_NNI_nrf" in df.columns:
+        all_methods.append("BioNJ_Add_NNI")
+        all_labels.append("BioNJ + Add-NNI")
+        all_colors.append("#8c564b")
+    if "AddNJ2_Add_NNI_nrf" in df.columns:
+        all_methods.append("AddNJ2_Add_NNI")
+        all_labels.append("AddNJ2 + Add-NNI")
+        all_colors.append("#e377c2")
+
     # 1. nRF vs Taxa count for each divergence scale
-    fig, axes = plt.subplots(1, len(divergences), figsize=(16, 5), dpi=300, sharey=True)
+    fig, axes = plt.subplots(1, len(divergences), figsize=(18, 5), dpi=300, sharey=True)
     if len(divergences) == 1:
         axes = [axes]
 
     for ax, div in zip(axes, divergences):
         sub_df = df[df["divergence"] == div]
-        for m, lbl, col in zip(core_methods, labels, colors):
-            means = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].mean() for n in taxa_list]
-            sems = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].sem() for n in taxa_list]
-            ax.errorbar(taxa_list, means, yerr=sems, label=lbl, color=col, marker="o", capsize=3, lw=2)
+        for m, lbl, col in zip(all_methods, all_labels, all_colors):
+            valid_taxa = [n for n in taxa_list if f"{m}_nrf" in sub_df and sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].notna().any()]
+            if not valid_taxa:
+                continue
+            means = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].mean() for n in valid_taxa]
+            sems = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].sem() for n in valid_taxa]
+            ax.errorbar(valid_taxa, means, yerr=sems, label=lbl, color=col, marker="o", capsize=3, lw=2)
 
         ax.set_title(f"Divergence Scale D = {div}", fontsize=13, fontweight="bold")
         ax.set_xlabel("Number of Taxa (N)", fontsize=11, fontweight="bold")
         ax.set_xticks(taxa_list)
-        ax.set_ylim(0, max(0.3, df[[f"{m}_nrf" for m in core_methods if f"{m}_nrf" in df]].values.max() * 1.15))
+        ax.set_ylim(0, max(0.3, df[[f"{m}_nrf" for m in all_methods if f"{m}_nrf" in df]].dropna().values.max() * 1.15))
         ax.grid(True, ls="--", alpha=0.5)
 
     axes[0].set_ylabel("Normalized RF Distance (nRF)", fontsize=12, fontweight="bold")
@@ -196,11 +209,14 @@ def generate_large_scale_plots(df: pd.DataFrame, outdir: str = "results_large_sc
     print(f"[OK] Saved figure: {fig_path}")
 
     # 2. Runtime vs Taxa count (log-log scale)
-    plt.figure(figsize=(9, 5), dpi=300)
-    for m, lbl, col in zip(core_methods, labels, colors):
-        time_means = [df[df["n_taxa"] == n][f"{m}_time"].mean() for n in taxa_list]
-        time_sems = [df[df["n_taxa"] == n][f"{m}_time"].sem() for n in taxa_list]
-        plt.errorbar(taxa_list, time_means, yerr=time_sems, label=lbl, color=col, marker="s", capsize=3, lw=2)
+    plt.figure(figsize=(10, 5), dpi=300)
+    for m, lbl, col in zip(all_methods, all_labels, all_colors):
+        valid_taxa = [n for n in taxa_list if f"{m}_time" in df and df[df["n_taxa"] == n][f"{m}_time"].notna().any()]
+        if not valid_taxa:
+            continue
+        time_means = [df[df["n_taxa"] == n][f"{m}_time"].mean() for n in valid_taxa]
+        time_sems = [df[df["n_taxa"] == n][f"{m}_time"].sem() for n in valid_taxa]
+        plt.errorbar(valid_taxa, time_means, yerr=time_sems, label=lbl, color=col, marker="s", capsize=3, lw=2)
 
     plt.xscale("log", base=2)
     plt.yscale("log")

@@ -351,33 +351,46 @@ def add_nj2(
         best_q = float("inf")
         best_pair: Tuple[int, int] = (0, 1)
 
-        for a in range(m):
-            for b in range(a + 1, m):
-                others = [x for x in all_indices if x != a and x != b]
-                pairs_other = list(itertools.combinations(others, 2))
-                k = np.array([p[0] for p in pairs_other], dtype=np.int64)
-                l = np.array([p[1] for p in pairs_other], dtype=np.int64)
+        # For large m, pre-screen top candidate pairs using NJ Q-matrix
+        triu_i, triu_j = np.triu_indices(m, k=1)
+        q_vals = (m - 2) * curr_D[triu_i, triu_j] - r[triu_i] - r[triu_j]
 
-                s1 = curr_D[a, b] + curr_D[k, l]
-                s2 = curr_D[a, k] + curr_D[b, l]
-                s3 = curr_D[a, l] + curr_D[b, k]
+        if m > 24:
+            k_eval = min(50, len(q_vals))
+            top_indices = np.argpartition(q_vals, k_eval - 1)[:k_eval]
+            candidate_pairs = [(int(triu_i[idx]), int(triu_j[idx]), float(q_vals[idx])) for idx in top_indices]
+        else:
+            candidate_pairs = [(int(triu_i[idx]), int(triu_j[idx]), float(q_vals[idx])) for idx in range(len(q_vals))]
 
-                s_min = np.minimum(s1, np.minimum(s2, s3))
-                s_max = np.maximum(s1, np.maximum(s2, s3))
+        for a, b, q_val in candidate_pairs:
+            others = [x for x in all_indices if x != a and x != b]
+            pairs_other = list(itertools.combinations(others, 2))
+            if len(pairs_other) > 200:
+                step = len(pairs_other) // 200
+                pairs_other = pairs_other[::step][:200]
 
-                penalty = (s1 - s_min) / (s_max + eps)
-                score = float(np.mean(penalty))
-                q_val = (m - 2) * curr_D[a, b] - r[a] - r[b]
+            k = np.array([p[0] for p in pairs_other], dtype=np.int64)
+            l = np.array([p[1] for p in pairs_other], dtype=np.int64)
 
-                if score < best_score - tie_tolerance:
+            s1 = curr_D[a, b] + curr_D[k, l]
+            s2 = curr_D[a, k] + curr_D[b, l]
+            s3 = curr_D[a, l] + curr_D[b, k]
+
+            s_min = np.minimum(s1, np.minimum(s2, s3))
+            s_max = np.maximum(s1, np.maximum(s2, s3))
+
+            penalty = (s1 - s_min) / (s_max + eps)
+            score = float(np.mean(penalty))
+
+            if score < best_score - tie_tolerance:
+                best_score = score
+                best_q = q_val
+                best_pair = (a, b)
+            elif abs(score - best_score) <= tie_tolerance:
+                if q_val < best_q:
                     best_score = score
                     best_q = q_val
                     best_pair = (a, b)
-                elif abs(score - best_score) <= tie_tolerance:
-                    if q_val < best_q:
-                        best_score = score
-                        best_q = q_val
-                        best_pair = (a, b)
 
         a, b = best_pair
         r = np.sum(curr_D, axis=1)

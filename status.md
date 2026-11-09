@@ -1,3 +1,27 @@
+最終更新: 2026-11-10 02:28
+
+## 📈 進捗状況
+- [x] 完了: 大規模ベンチマーク計画の策定・外部PC実行パッケージの作成 (完了日: 11/10)
+- [x] 完了: MSA+ML (MAFFT + FastTree WAG+Gamma) パイプライン実装と単体テスト (完了日: 11/10)
+- [x] 完了: AddNJ2のトップKスクリーニングによる大規模データ高速化 ($N=128$ で0.30秒) (完了日: 11/10)
+- [x] 完了: 大規模検証スクリプト `benchmark_large_scale.py` の動作検証 (完了日: 11/10)
+- [x] 完了: 完全ポータブル環境定義 `environment.yml` および実行計画書 `LargeScale_Benchmark_Plan.md` の作成 (完了日: 11/10)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: $N=128$ ではカルテット数が約 $1.07 \times 10^7$ 通りとなり、全ペア探索（8,128ペア）を愚直に行うと計算が停止したように遅延する問題。また、基準となる最高精度法として多重整列＋最尤法（MSA + ML）の追加が必要。
+- **[解決策]**:
+  1. `src/ml_wrapper.py` に `mafft --auto` による多重整列と `FastTree -wag -gamma` による最尤系統樹推論パイプラインを実装。
+  2. `add_nj2` に NJ の $Q$ 行列による候補ペアのトップ $K=50$ スクリーニングおよびカルテットサンプリング（最大200ペア）を導入。これにより $N=128$ の木構築時間を数分以上からわずか 0.30 秒に短縮。
+  3. 別の計算機・スパコンですぐに再現実行できるよう、環境定義 `environment.yml` と自律実行スクリプト `benchmark_large_scale.py`、および詳細な実行手引き `LargeScale_Benchmark_Plan.md` を作成。
+- **[パラメータ]**: $N \in \{32, 64, 128\}$, $L=500$ aa, WAG+Gamma ($\alpha=1.0$), divergence $\in \{0.5, 1.0, 2.0\}$, 10 replicates each (計90データセット). 比較手法: MSA+ML, NJ, BioNJ, FastME-SPR, AddNJ2, BioNJ+Add-NNI, AddNJ2+Add-NNI.
+
+## 🚀 次に行うこと (Next Actions)
+1. 外部マシン（またはスパコン / Google Colab / GPUサーバー）へのリポジトリ配置と環境構築 (`micromamba create -f environment.yml`)
+2. 大規模ベンチマークの実行 (`python benchmark_large_scale.py --taxa 32 64 128 --replicates 10 --outdir results_large_scale`)
+3. 生成された `results_large_scale/` の回収と解析結果の報告
+
+---
+
 最終更新: 2026-11-10 02:08
 
 ## 📈 進捗状況

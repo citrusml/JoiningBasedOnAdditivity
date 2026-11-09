@@ -92,3 +92,4 @@ def test_hill_climb_improves_topology() -> None:
     t_opt_hyb = parse_tree(best_hyb_newick, tns)
     rf_hyb = treecompare.symmetric_difference(true_tree, t_opt_hyb)
     assert rf_hyb == 0, f"Hybrid should recover true topology (rf=0), got {rf_hyb}"
+

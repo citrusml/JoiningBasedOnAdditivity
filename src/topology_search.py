@@ -316,3 +316,4 @@ def hill_climb_search(
                 print(f"[{phase.upper()} iter {it+1}] Improved penalty: {best_score:.6f}")
 
     return tree_to_newick(current_tree), best_score
+

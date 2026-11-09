@@ -26,6 +26,12 @@ from src.fastme_wrapper import run_fastme
 from src.ml_wrapper import run_msa_ml
 from src.topology_search import TreeScorer, hill_climb_search
 
+# Ensure stdout and stderr flush line-by-line even when redirected with nohup / file redirection
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(line_buffering=True)
+
 
 def run_large_scale_benchmark(
     taxa_list: List[int] = [32, 64, 128],

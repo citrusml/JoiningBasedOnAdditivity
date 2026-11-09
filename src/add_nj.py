@@ -303,3 +303,170 @@ def add_nj(
         return root.to_newick() + ";"
 
     raise RuntimeError(f"Unexpected termination state with {len(nodes)} nodes.")
+
+
+def add_nj2(
+    D: np.ndarray,
+    taxa_names: List[str],
+    eps: float = 1e-7,
+    tie_tolerance: float = 1e-6,
+) -> str:
+    """
+    Constructs a phylogenetic tree Newick string using the AddNJ2 algorithm.
+
+    Selects joining pairs by minimizing Sister-Pair Quartet Inconsistency:
+    for candidate pair (a, b), evaluates all other pairs (k, l) to verify
+    whether D_ab + D_kl <= min(D_ak + D_bl, D_al + D_bk).
+
+    Parameters
+    ----------
+    D : np.ndarray
+        Symmetric evolutionary distance matrix of shape (n, n) in substitutions/site.
+    taxa_names : List[str]
+        Identifiers for each taxon (unitless).
+    eps : float, default=1e-7
+        Numerical stability constant (unitless).
+    tie_tolerance : float, default=1e-6
+        Tolerance threshold for tie-breaking using the NJ Q-criterion (unitless).
+
+    Returns
+    -------
+    str
+        Unrooted Newick tree string with branch lengths in substitutions/site.
+    """
+    n = len(taxa_names)
+    if n < 3:
+        raise ValueError(f"At least 3 taxa required, got {n}.")
+
+    curr_D = np.copy(D).astype(np.float64)
+    nodes: List[TreeNode] = [TreeNode(name=name) for name in taxa_names]
+    internal_id = 1
+
+    while len(nodes) > 4:
+        m = len(nodes)
+        r = np.sum(curr_D, axis=1)
+        all_indices = list(range(m))
+
+        best_score = float("inf")
+        best_q = float("inf")
+        best_pair: Tuple[int, int] = (0, 1)
+
+        for a in range(m):
+            for b in range(a + 1, m):
+                others = [x for x in all_indices if x != a and x != b]
+                pairs_other = list(itertools.combinations(others, 2))
+                k = np.array([p[0] for p in pairs_other], dtype=np.int64)
+                l = np.array([p[1] for p in pairs_other], dtype=np.int64)
+
+                s1 = curr_D[a, b] + curr_D[k, l]
+                s2 = curr_D[a, k] + curr_D[b, l]
+                s3 = curr_D[a, l] + curr_D[b, k]
+
+                s_min = np.minimum(s1, np.minimum(s2, s3))
+                s_max = np.maximum(s1, np.maximum(s2, s3))
+
+                penalty = (s1 - s_min) / (s_max + eps)
+                score = float(np.mean(penalty))
+                q_val = (m - 2) * curr_D[a, b] - r[a] - r[b]
+
+                if score < best_score - tie_tolerance:
+                    best_score = score
+                    best_q = q_val
+                    best_pair = (a, b)
+                elif abs(score - best_score) <= tie_tolerance:
+                    if q_val < best_q:
+                        best_score = score
+                        best_q = q_val
+                        best_pair = (a, b)
+
+        a, b = best_pair
+        r = np.sum(curr_D, axis=1)
+        r_a = r[a]
+        r_b = r[b]
+        d_ab = curr_D[a, b]
+
+        v_a = 0.5 * d_ab + (r_a - r_b) / (2.0 * (m - 2))
+        v_b = d_ab - v_a
+
+        node_u = TreeNode(
+            name=f"Node_{internal_id}",
+            children=[(nodes[a], float(v_a)), (nodes[b], float(v_b))],
+        )
+        internal_id += 1
+
+        rem_idx = [x for x in range(m) if x != a and x != b]
+        d_u = 0.5 * (curr_D[a, rem_idx] + curr_D[b, rem_idx] - curr_D[a, b])
+        D_sub = curr_D[np.ix_(rem_idx, rem_idx)]
+
+        new_D = np.zeros((m - 1, m - 1), dtype=np.float64)
+        new_D[: m - 2, : m - 2] = D_sub
+        new_D[m - 2, : m - 2] = d_u
+        new_D[: m - 2, m - 2] = d_u
+
+        new_nodes: List[TreeNode] = [nodes[x] for x in rem_idx]
+        new_nodes.append(node_u)
+
+        curr_D = new_D
+        nodes = new_nodes
+
+    if len(nodes) == 4:
+        s1 = curr_D[0, 1] + curr_D[2, 3]
+        s2 = curr_D[0, 2] + curr_D[1, 3]
+        s3 = curr_D[0, 3] + curr_D[1, 2]
+
+        if s1 <= s2 and s1 <= s3:
+            a, b = 0, 1
+        elif s2 <= s1 and s2 <= s3:
+            a, b = 0, 2
+        else:
+            a, b = 0, 3
+
+        r = np.sum(curr_D, axis=1)
+        r_a = r[a]
+        r_b = r[b]
+        d_ab = curr_D[a, b]
+        v_a = 0.5 * d_ab + (r_a - r_b) / 4.0
+        v_b = d_ab - v_a
+
+        node_u = TreeNode(
+            name=f"Node_{internal_id}",
+            children=[(nodes[a], float(v_a)), (nodes[b], float(v_b))],
+        )
+        internal_id += 1
+
+        rem_idx = [x for x in range(4) if x != a and x != b]
+        d_u = 0.5 * (curr_D[a, rem_idx] + curr_D[b, rem_idx] - curr_D[a, b])
+        D_sub = curr_D[np.ix_(rem_idx, rem_idx)]
+
+        new_D = np.zeros((3, 3), dtype=np.float64)
+        new_D[:2, :2] = D_sub
+        new_D[2, :2] = d_u
+        new_D[:2, 2] = d_u
+
+        new_nodes = [nodes[x] for x in rem_idx]
+        new_nodes.append(node_u)
+
+        curr_D = new_D
+        nodes = new_nodes
+
+    if len(nodes) == 3:
+        d01 = curr_D[0, 1]
+        d02 = curr_D[0, 2]
+        d12 = curr_D[1, 2]
+
+        v0 = 0.5 * (d01 + d02 - d12)
+        v1 = 0.5 * (d01 + d12 - d02)
+        v2 = 0.5 * (d02 + d12 - d01)
+
+        root = TreeNode(
+            name="Root",
+            children=[
+                (nodes[0], float(v0)),
+                (nodes[1], float(v1)),
+                (nodes[2], float(v2)),
+            ],
+        )
+        return root.to_newick() + ";"
+
+    raise RuntimeError(f"Unexpected termination state with {len(nodes)} nodes.")
+

@@ -21,7 +21,7 @@ from src.tree_simulator import generate_backward_yule_tree, compute_patristic_di
 from src.sequence_simulator import WAGModel, simulate_wag_gamma_sequences, compute_pairwise_poisson_distance_matrix
 from src.tree_inference import matrix_to_nj_newick
 from src.evaluation import evaluate_tree_rf, FourPointCore
-from src.add_nj import add_nj
+from src.add_nj import add_nj, add_nj2
 from src.fastme_wrapper import run_fastme
 from src.topology_search import TreeScorer, hill_climb_search
 
@@ -153,6 +153,13 @@ def run_benchmark(
             s_addnj = scorer.score_tree(Phylo.read(io.StringIO(addnj_nwk), "newick"))
             method_outputs["AddNJ"] = (addnj_nwk, t_addnj, s_addnj)
 
+            # 6. AddNJ2 (Method 1 Improved: Sister-Pair Quartet Consistency)
+            t0 = time.time()
+            addnj2_nwk = add_nj2(D_obs, taxa_names)
+            t_addnj2 = time.time() - t0
+            s_addnj2 = scorer.score_tree(Phylo.read(io.StringIO(addnj2_nwk), "newick"))
+            method_outputs["AddNJ2"] = (addnj2_nwk, t_addnj2, s_addnj2)
+
             # 6. NJ + Add-NNI (Method 2)
             t0 = time.time()
             nj_nni_nwk, s_nj_nni = hill_climb_search(nj_nwk, scorer, mode="nni")
@@ -195,6 +202,12 @@ def run_benchmark(
             t_addnj_hyb = time.time() - t0
             method_outputs["AddNJ_Add_Hybrid"] = (addnj_hyb_nwk, t_addnj_hyb, s_addnj_hyb)
 
+            # 13. AddNJ2 + Add-Hybrid
+            t0 = time.time()
+            addnj2_hyb_nwk, s_addnj2_hyb = hill_climb_search(addnj2_nwk, scorer, mode="hybrid")
+            t_addnj2_hyb = time.time() - t0
+            method_outputs["AddNJ2_Add_Hybrid"] = (addnj2_hyb_nwk, t_addnj2_hyb, s_addnj2_hyb)
+
             # Evaluate nRF for each method
             row = dict(base_info)
             for m_name, (inferred_str, runtime, penalty) in method_outputs.items():
@@ -211,6 +224,7 @@ def run_benchmark(
                 f"BioNJ={row['BioNJ_nrf']:.3f} | "
                 f"FastME-SPR={row['FastME_SPR_nrf']:.3f} | "
                 f"AddNJ={row['AddNJ_nrf']:.3f} | "
+                f"AddNJ2={row['AddNJ2_nrf']:.3f} | "
                 f"NJ+Add-Hyb={row['NJ_Add_Hybrid_nrf']:.3f} | "
                 f"BioNJ+Add-Hyb={row['BioNJ_Add_Hybrid_nrf']:.3f}"
             )
@@ -232,6 +246,7 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "FastME_NNI",
         "FastME_SPR",
         "AddNJ",
+        "AddNJ2",
         "NJ_Add_NNI",
         "NJ_Add_SPR",
         "NJ_Add_Hybrid",
@@ -239,6 +254,7 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "BioNJ_Add_SPR",
         "BioNJ_Add_Hybrid",
         "AddNJ_Add_Hybrid",
+        "AddNJ2_Add_Hybrid",
     ]
 
     labels = [
@@ -247,6 +263,7 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "FastME (NNI)",
         "FastME (SPR)",
         "AddNJ (Method 1)",
+        "AddNJ2 (Improved M1)",
         "NJ + Add-NNI",
         "NJ + Add-SPR",
         "NJ + Add-Hybrid",
@@ -254,6 +271,7 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "BioNJ + Add-SPR",
         "BioNJ + Add-Hybrid",
         "AddNJ + Add-Hybrid",
+        "AddNJ2 + Add-Hybrid",
     ]
 
     divergences = sorted(df["divergence"].unique())
@@ -317,7 +335,8 @@ def update_raw_results(df: pd.DataFrame) -> None:
         ("BioNJ", "BioNJ"),
         ("FastME_NNI", "FastME-NNI"),
         ("FastME_SPR", "FastME-SPR"),
-        ("AddNJ", "AddNJ (手法1)"),
+        ("AddNJ", "AddNJ (手法1: 縮約後欠損)"),
+        ("AddNJ2", "AddNJ2 (手法1改善: 姉妹群整合度)"),
         ("NJ_Add_NNI", "NJ + Add-NNI (手法2)"),
         ("NJ_Add_SPR", "NJ + Add-SPR (手法2)"),
         ("NJ_Add_Hybrid", "NJ + Add-Hybrid (手法2)"),
@@ -325,6 +344,7 @@ def update_raw_results(df: pd.DataFrame) -> None:
         ("BioNJ_Add_SPR", "BioNJ + Add-SPR"),
         ("BioNJ_Add_Hybrid", "BioNJ + Add-Hybrid"),
         ("AddNJ_Add_Hybrid", "AddNJ + Add-Hybrid"),
+        ("AddNJ2_Add_Hybrid", "AddNJ2 + Add-Hybrid"),
     ]
 
     divergences = sorted(df["divergence"].unique())
@@ -344,8 +364,8 @@ def update_raw_results(df: pd.DataFrame) -> None:
         content += f"| **{m_label}** | {nrf_strs[0]} | {nrf_strs[1]} | {nrf_strs[2]} | {avg_time:.4f}s |\n"
 
     content += "\n### 全レプリケート生データ (抜粋: 各条件最初の3反復)\n\n"
-    content += "| Rep | Div | Standard NJ | BioNJ | FastME-SPR | AddNJ | NJ+Add-Hyb | BioNJ+Add-Hyb | AddNJ+Add-Hyb |\n"
-    content += "| :-: | :-: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
+    content += "| Rep | Div | Standard NJ | BioNJ | FastME-SPR | AddNJ | AddNJ2 | NJ+Add-Hyb | BioNJ+Add-Hyb | AddNJ2+Add-Hyb |\n"
+    content += "| :-: | :-: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
 
     for d in divergences:
         sub_df = df[df["divergence"] == d].head(3)
@@ -353,8 +373,8 @@ def update_raw_results(df: pd.DataFrame) -> None:
             content += (
                 f"| {int(r['replicate'])} | {r['divergence']:.1f} | "
                 f"{r['Standard_NJ_nrf']:.3f} | {r['BioNJ_nrf']:.3f} | {r['FastME_SPR_nrf']:.3f} | "
-                f"{r['AddNJ_nrf']:.3f} | {r['NJ_Add_Hybrid_nrf']:.3f} | {r['BioNJ_Add_Hybrid_nrf']:.3f} | "
-                f"{r['AddNJ_Add_Hybrid_nrf']:.3f} |\n"
+                f"{r['AddNJ_nrf']:.3f} | {r['AddNJ2_nrf']:.3f} | {r['NJ_Add_Hybrid_nrf']:.3f} | "
+                f"{r['BioNJ_Add_Hybrid_nrf']:.3f} | {r['AddNJ2_Add_Hybrid_nrf']:.3f} |\n"
             )
 
     with open("RawResults.md", "a") as f:

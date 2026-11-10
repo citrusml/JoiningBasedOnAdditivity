@@ -2,7 +2,7 @@
 Evaluation metrics for distance matrix accuracy, four-point condition defect, and tree topology.
 """
 
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 import dendropy
 from dendropy.calculate import treecompare
@@ -140,3 +140,111 @@ def evaluate_tree_rf(
         "rf": rf,
         "nrf": float(nrf),
     }
+
+
+def compute_topological_distance_edges(
+    tree_newick: str,
+    taxon1: str,
+    taxon2: str,
+    taxa_names: List[str],
+) -> int:
+    """
+    Computes topological shortest path distance (number of edges) between two taxa
+    in an unrooted phylogenetic tree via Breadth-First Search (BFS).
+
+    Parameters
+    ----------
+    tree_newick : str
+        Newick string of the phylogenetic tree.
+    taxon1 : str
+        First terminal taxon label.
+    taxon2 : str
+        Second terminal taxon label.
+    taxa_names : List[str]
+        List of all valid taxa labels in the tree namespace.
+
+    Returns
+    -------
+    int
+        Shortest path distance in number of edges (branches).
+        Returns -1 if either taxon is not found.
+    """
+    tns = dendropy.TaxonNamespace(taxa_names)
+    tree = parse_unrooted_tree(tree_newick, tns)
+    tree.collapse_basal_bifurcation(set_as_unrooted_tree=True)
+
+    node1 = tree.find_node_with_taxon_label(taxon1)
+    node2 = tree.find_node_with_taxon_label(taxon2)
+    if not node1 or not node2:
+        return -1
+
+    visited = {node1: 0}
+    queue = [node1]
+    while queue:
+        cur = queue.pop(0)
+        dist = visited[cur]
+        if cur == node2:
+            return dist
+        neighbors = []
+        if cur.parent_node:
+            neighbors.append(cur.parent_node)
+        for child in cur.child_nodes():
+            neighbors.append(child)
+        for nbr in neighbors:
+            if nbr not in visited:
+                visited[nbr] = dist + 1
+                queue.append(nbr)
+    return -1
+
+
+def evaluate_tree_lba(
+    est_tree_newick: str,
+    true_tree_newick: str,
+    taxa_names: List[str],
+    lba_pair: Optional[Tuple[str, str]] = None,
+) -> Dict[str, float]:
+    """
+    Evaluates both general tree topology error (RF/nRF) and specific Long Branch
+    Attraction (LBA) metrics between designated long-branch taxa.
+
+    Parameters
+    ----------
+    est_tree_newick : str
+        Newick string of inferred tree.
+    true_tree_newick : str
+        Newick string of ground-truth tree.
+    taxa_names : List[str]
+        Complete list of leaf taxa labels.
+    lba_pair : Optional[Tuple[str, str]], default=None
+        Tuple of the two long-branch taxa. If None, defaults to (taxa_names[0], taxa_names[-1]).
+
+    Returns
+    -------
+    Dict[str, float]
+        Dictionary containing:
+        - 'rf': Robinson-Foulds symmetric distance [unitless].
+        - 'nrf': Normalized Robinson-Foulds distance in [0, 1] [unitless].
+        - 'ds_est': Shortest path edge distance between LBA taxa in estimated tree [edges].
+        - 'ds_true': Shortest path edge distance between LBA taxa in true tree [edges].
+        - 'delta_ds': Path reduction ds_true - ds_est (positive indicates attraction) [edges].
+        - 'is_sister': 1.0 if estimated as immediate sister taxa (ds_est == 2), 0.0 otherwise [unitless].
+    """
+    rf_res = evaluate_tree_rf(est_tree_newick, true_tree_newick, taxa_names)
+    t1 = lba_pair[0] if lba_pair else taxa_names[0]
+    t2 = lba_pair[1] if lba_pair else taxa_names[-1]
+
+    ds_est = compute_topological_distance_edges(est_tree_newick, t1, t2, taxa_names)
+    ds_true = compute_topological_distance_edges(true_tree_newick, t1, t2, taxa_names)
+    delta_ds = (ds_true - ds_est) if (ds_est >= 0 and ds_true >= 0) else 0
+
+    is_sister = 1.0 if ds_est == 2 else 0.0
+
+    return {
+        "rf": rf_res["rf"],
+        "nrf": rf_res["nrf"],
+        "ds_est": float(ds_est),
+        "ds_true": float(ds_true),
+        "delta_ds": float(delta_ds),
+        "is_sister": is_sister,
+    }
+

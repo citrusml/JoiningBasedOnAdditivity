@@ -106,6 +106,43 @@ $$
 - `src/evaluation.py`: 評価指標（正規化Robinson-Foulds距離: nRF, カルテット加法性欠損 $\Delta_{\text{ADD}}$, 実行時間）。
 - `main.py`: ベンチマーク実行用エントリポイント（30反復の自動実行、集計、可視化出力）。
 - `tests/`: 各モジュールの pytest 単体テストコード群。
+- `benchmark_lba.py`: 長枝牽引（LBA）効果検証の並列ベンチマーク実行スクリプト。
+- `analysis/plot_lba_results.py`: LBA解析（DS推移、偽姉妹群率、nRF、実行時間）の論文品質可視化スクリプト。
 - `RawResults.md`: 全実験レプリケートの生データ記録。
 - `status.md`: 開発および実験の進捗記録。
+
+---
+
+## 5. 長枝牽引（LBA: Long Branch Attraction）のモデル化と評価手法
+
+### 5.1 LBAアーティファクトの発生メカニズム
+長枝牽引（Felsenstein 1978）は、真の系統樹上で遠く離れた2つの系統（Taxa $T_1$ および $T_N$）の末端枝長が極端に伸長した際に生じます。
+ポアソン距離補正 $d = -\ln(1 - p)$ において、$p$ が飽和領域に近づくと分散が急増し、非姉妹群である長枝同士の収束変異やノイズによって、距離法（特に総枝長最小化を狙うNJ系手法）がこれらを誤って「姉妹群」として結合してしまう現象です。
+
+### 5.2 系統樹シミュレーションにおけるLBA付与
+BioPerl（`Bio::Tree::RandomFactory` による Backward Yule 過程）にて生成された樹形に対し、端点系統 $T_1$ および $T_N$ の末端枝長に倍率 `lba_ratio` を乗算します：
+$$
+l_{\text{scaled}}(T) = 
+\begin{cases}
+l(T) \times \text{lba\_ratio} & (T \in \{T_1, T_N\}) \\
+l(T) & (\text{otherwise})
+\end{cases}
+$$
+本研究では、対照群として `lba_ratio = 1.0`（LBAなし）、LBA負荷条件として `lba_ratio = 3.0`（先行研究 Matsui & Iwasaki 2020 準拠）を設定します。
+
+### 5.3 LBA特化の評価指標
+
+1. **最短パス枝数 $DS(T_1, T_N)$ (Shortest Path Distance)**:
+   無向系統樹グラフにおいて、幅優先探索（BFS）により $T_1$ と $T_N$ を結ぶパスに含まれる枝数（エッジ数）を算出します。
+   - 真の木における距離: $DS_{\text{true}}$
+   - 推定木における距離: $DS_{\text{est}}$
+   - 枝数短縮度: $\Delta DS = DS_{\text{true}} - DS_{\text{est}}$
+2. **偽姉妹群形成率 (False Sister Rate, %)**:
+   推定木において $DS_{\text{est}} = 2$（共通の直近内部ノードに直接結合した姉妹群）となってしまった試行の割合：
+   $$
+   \text{FalseSisterRate} = \frac{1}{R} \sum_{r=1}^R \mathbb{I}(DS_{\text{est}}^{(r)} = 2) \times 100\%
+   $$
+3. **加法性基準の耐性仮説**:
+   加法性に基づく手法（AddNJ2）は、4点条件の不等式整合度（$S_1 \le \min(S_2, S_3)$）のみで結合ペアを選択するため、長枝の絶対値増大に惑わされにくく、従来のNJやBioNJよりも高いLBA耐性を発揮します。
+
 

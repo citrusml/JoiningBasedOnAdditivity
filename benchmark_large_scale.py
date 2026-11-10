@@ -154,84 +154,17 @@ def run_large_scale_benchmark(
     return df
 
 
+from analysis.plot_large_scale import plot_benchmark_results, plot_runtime_results
+
+
 def generate_large_scale_plots(df: pd.DataFrame, outdir: str = "results_large_scale") -> None:
     """
-    Generates publication-quality scaling charts for varying Taxa N (300 DPI).
+    Generates publication-quality scaling charts for varying Taxa N (300 DPI)
+    using the unified plotting module in analysis/plot_large_scale.py.
     """
-    taxa_list = sorted(df["n_taxa"].unique())
-    divergences = sorted(df["divergence"].unique())
+    plot_benchmark_results(df, outdir=outdir)
+    plot_runtime_results(df, outdir=outdir)
 
-    core_methods = ["MSA_ML", "Standard_NJ", "BioNJ", "FastME_SPR", "AddNJ2"]
-    labels = ["MSA + ML (FastTree)", "Standard NJ", "BioNJ", "FastME-SPR", "AddNJ2 (Proposed)"]
-    colors = ["#d62728", "#1f77b4", "#ff7f0e", "#2ca02c", "#9467bd"]
-
-    # Optional NNI methods if evaluated
-    all_methods = list(core_methods)
-    all_labels = list(labels)
-    all_colors = list(colors)
-    if "BioNJ_Add_NNI_nrf" in df.columns:
-        all_methods.append("BioNJ_Add_NNI")
-        all_labels.append("BioNJ + Add-NNI")
-        all_colors.append("#8c564b")
-    if "AddNJ2_Add_NNI_nrf" in df.columns:
-        all_methods.append("AddNJ2_Add_NNI")
-        all_labels.append("AddNJ2 + Add-NNI")
-        all_colors.append("#e377c2")
-
-    # 1. nRF vs Taxa count for each divergence scale
-    fig, axes = plt.subplots(1, len(divergences), figsize=(18, 5), dpi=300, sharey=True)
-    if len(divergences) == 1:
-        axes = [axes]
-
-    for ax, div in zip(axes, divergences):
-        sub_df = df[df["divergence"] == div]
-        for m, lbl, col in zip(all_methods, all_labels, all_colors):
-            valid_taxa = [n for n in taxa_list if f"{m}_nrf" in sub_df and sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].notna().any()]
-            if not valid_taxa:
-                continue
-            means = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].mean() for n in valid_taxa]
-            sems = [sub_df[sub_df["n_taxa"] == n][f"{m}_nrf"].sem() for n in valid_taxa]
-            ax.errorbar(valid_taxa, means, yerr=sems, label=lbl, color=col, marker="o", capsize=3, lw=2)
-
-        ax.set_title(f"Divergence Scale D = {div}", fontsize=13, fontweight="bold")
-        ax.set_xlabel("Number of Taxa (N)", fontsize=11, fontweight="bold")
-        ax.set_xticks(taxa_list)
-        ax.set_ylim(0, max(0.3, df[[f"{m}_nrf" for m in all_methods if f"{m}_nrf" in df]].dropna().values.max() * 1.15))
-        ax.grid(True, ls="--", alpha=0.5)
-
-    axes[0].set_ylabel("Normalized RF Distance (nRF)", fontsize=12, fontweight="bold")
-    axes[-1].legend(bbox_to_anchor=(1.05, 1), loc="upper left", fontsize=10)
-    plt.tight_layout()
-
-    fig_path = os.path.join(outdir, "nrf_vs_taxa.png")
-    plt.savefig(fig_path, dpi=300)
-    plt.close()
-    print(f"[OK] Saved figure: {fig_path}")
-
-    # 2. Runtime vs Taxa count (log-log scale)
-    plt.figure(figsize=(10, 5), dpi=300)
-    for m, lbl, col in zip(all_methods, all_labels, all_colors):
-        valid_taxa = [n for n in taxa_list if f"{m}_time" in df and df[df["n_taxa"] == n][f"{m}_time"].notna().any()]
-        if not valid_taxa:
-            continue
-        time_means = [df[df["n_taxa"] == n][f"{m}_time"].mean() for n in valid_taxa]
-        time_sems = [df[df["n_taxa"] == n][f"{m}_time"].sem() for n in valid_taxa]
-        plt.errorbar(valid_taxa, time_means, yerr=time_sems, label=lbl, color=col, marker="s", capsize=3, lw=2)
-
-    plt.xscale("log", base=2)
-    plt.yscale("log")
-    plt.xticks(taxa_list, [f"N={n}" for n in taxa_list], fontsize=11)
-    plt.xlabel("Number of Taxa N (log scale)", fontsize=12, fontweight="bold")
-    plt.ylabel("Execution Time per Replicate (seconds, log scale)", fontsize=12, fontweight="bold")
-    plt.title("Computational Runtime Scaling (L=500 aa)", fontsize=13, fontweight="bold")
-    plt.grid(True, which="both", ls="--", alpha=0.5)
-    plt.legend(fontsize=10)
-    plt.tight_layout()
-
-    fig_time = os.path.join(outdir, "runtime_vs_taxa.png")
-    plt.savefig(fig_time, dpi=300)
-    plt.close()
-    print(f"[OK] Saved figure: {fig_time}")
 
 
 if __name__ == "__main__":

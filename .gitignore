@@ -1,6 +1,7 @@
 # Auto-generated data and results
 data/
-results/
+results*/
 __pycache__/
 *.pyc
 .pytest_cache/
+.DS_Store

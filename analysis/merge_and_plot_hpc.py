@@ -51,7 +51,22 @@ def merge_shards(outdir: str = "results_hpc") -> pd.DataFrame:
     merged_path = os.path.join(outdir, "hpc_benchmark_summary.csv")
     df.to_csv(merged_path, index=False)
     print(f"[OK] Merged {len(files)} shard files ({len(df)} total rows) -> {merged_path}")
+
+    # Also merge JSONL tree shards into a single consolidated all_trees.jsonl
+    tree_pattern = os.path.join(outdir, "trees", "trees_N*.jsonl")
+    tree_files = sorted(glob.glob(tree_pattern))
+    if tree_files:
+        all_trees_path = os.path.join(outdir, "trees", "all_trees.jsonl")
+        with open(all_trees_path, "w") as out_f:
+            for tf in tree_files:
+                with open(tf, "r") as in_f:
+                    for line in in_f:
+                        if line.strip():
+                            out_f.write(line)
+        print(f"[OK] Merged {len(tree_files)} tree JSONL shards -> {all_trees_path}")
+
     return df
+
 
 
 def _plot_metric_by_taxa_and_divergence(
@@ -233,3 +248,4 @@ if __name__ == "__main__":
 
     df_merged = merge_shards(outdir=args.outdir)
     generate_all_hpc_plots(df_merged, outdir=args.outdir)
+

@@ -167,12 +167,12 @@ def run_hpc_benchmark_condition(
     os.makedirs(shards_dir, exist_ok=True)
     os.makedirs(trees_dir, exist_ok=True)
 
-    tag = f"N{n_taxa}_D{divergence}"
-    if rep_start != 1 or rep_end < 30:
-        tag += f"_R{rep_start}_{rep_end}"
-
+    tag = f"N{n_taxa}_D{divergence}_R{rep_start}_{rep_end}"
     csv_path = os.path.join(shards_dir, f"summary_{tag}.csv")
     jsonl_tree_path = os.path.join(trees_dir, f"trees_{tag}.jsonl")
+    if os.path.exists(jsonl_tree_path):
+        os.remove(jsonl_tree_path)
+
 
     wag = WAGModel(wag_path="src/wag.dat", alpha=alpha)
     records: List[Dict[str, Any]] = []
@@ -360,3 +360,4 @@ if __name__ == "__main__":
                 outdir=args.outdir,
                 seed=args.seed,
             )
+

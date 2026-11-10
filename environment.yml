@@ -15,4 +15,6 @@ dependencies:
   - fastme=2.1.6.3
   - fasttree=2.2.0
   - mafft=7.526
+  - mmseqs2
+
 

@@ -10,10 +10,13 @@ Implements:
 
 from typing import Dict, List, Tuple, Optional
 import os
+import sys
 import math
+import shutil
 import tempfile
 import subprocess
 import numpy as np
+
 import scipy.linalg
 import scipy.stats
 from Bio import SeqIO
@@ -129,6 +132,71 @@ class WAGModel:
             P[c] = p_mat
 
         return P
+
+    def get_marginal_log_prob_grid(
+        self,
+        max_dist: float = 5.0,
+        n_grid: int = 500,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Precomputes marginal transition log-probability matrices across a distance grid
+        under the discrete Gamma WAG model.
+
+        Parameters
+        ----------
+        max_dist : float, default=5.0
+            Maximum evolutionary distance on the grid (substitutions/site).
+        n_grid : int, default=500
+            Number of grid points (unitless).
+
+        Returns
+        -------
+        Tuple[np.ndarray, np.ndarray]
+            - grid_d : 1D array of shape (n_grid,) in substitutions/site.
+            - log_P_flat : 2D array of shape (n_grid, 400) containing ln P_ab(d) (unitless).
+        """
+        cache_key = (max_dist, n_grid)
+        if hasattr(self, "_grid_cache") and cache_key in self._grid_cache:
+            return self._grid_cache[cache_key]
+
+        if not hasattr(self, "_grid_cache"):
+            self._grid_cache: Dict[Tuple[float, int], Tuple[np.ndarray, np.ndarray]] = {}
+
+        # Combine dense small distances and linear grid up to max_dist
+        grid_d = np.concatenate([
+            np.linspace(1e-5, 0.2, n_grid // 3, endpoint=False),
+            np.linspace(0.2, max_dist, n_grid - (n_grid // 3)),
+        ])
+
+        log_P_flat = np.zeros((len(grid_d), 400), dtype=np.float64)
+        for idx, d in enumerate(grid_d):
+            P_cats = self.get_transition_matrices(float(d))  # (k, 20, 20)
+            P_marg = np.mean(P_cats, axis=0)  # (20, 20)
+            P_marg = np.maximum(P_marg, 1e-15)
+            log_P_flat[idx] = np.log(P_marg).ravel()
+
+        self._grid_cache[cache_key] = (grid_d, log_P_flat)
+        return grid_d, log_P_flat
+
+    def marginal_log_likelihood(self, counts_flat: np.ndarray, dist: float) -> float:
+        """
+        Computes exact WAG+Gamma log-likelihood for a single flattened 20x20 transition count vector.
+
+        Parameters
+        ----------
+        counts_flat : np.ndarray
+            Flattened 20x20 amino acid transition counts of shape (400,) (sites).
+        dist : float
+            Candidate evolutionary distance (substitutions/site).
+
+        Returns
+        -------
+        float
+            Log-likelihood value (unitless).
+        """
+        P_cats = self.get_transition_matrices(dist)
+        P_marg = np.maximum(np.mean(P_cats, axis=0), 1e-15)
+        return float(np.dot(counts_flat, np.log(P_marg).ravel()))
 
 
 def simulate_wag_gamma_sequences(
@@ -385,4 +453,520 @@ def compute_mafft_msa_poisson_distance_matrix(
             D_msa[j, i] = d
 
     return D_msa
+
+
+_ASCII_TO_AA = np.full(256, -1, dtype=np.int64)
+for _aa_char, _aa_idx in AA_TO_INT.items():
+    _ASCII_TO_AA[ord(_aa_char)] = _aa_idx
+
+
+def _extract_alignment_counts_and_poisson(
+    aln_i: str,
+    aln_j: str,
+    max_poisson_dist: float = 3.0,
+) -> Tuple[np.ndarray, float]:
+    """
+    Extracts flattened 20x20 amino acid transition count vector and Poisson distance
+    from two aligned sequence strings using vectorized byte lookup.
+
+    Parameters
+    ----------
+    aln_i : str
+        First aligned sequence string (amino acids and '-').
+    aln_j : str
+        Second aligned sequence string (amino acids and '-').
+    max_poisson_dist : float, default=3.0
+        Maximum cap for Poisson distance (substitutions/site).
+
+    Returns
+    -------
+    Tuple[np.ndarray, float]
+        - counts_flat : Flattened 20x20 transition count array of shape (400,) (sites).
+        - d_poisson : Estimated Poisson distance (substitutions/site).
+    """
+    b_i = np.frombuffer(aln_i.encode("ascii"), dtype=np.uint8)
+    b_j = np.frombuffer(aln_j.encode("ascii"), dtype=np.uint8)
+    aa_i = _ASCII_TO_AA[b_i]
+    aa_j = _ASCII_TO_AA[b_j]
+
+    valid = (aa_i >= 0) & (aa_j >= 0)
+    v_i = aa_i[valid]
+    v_j = aa_j[valid]
+
+    n_valid = len(v_i)
+    if n_valid == 0:
+        return np.zeros(400, dtype=np.float64), 0.0
+
+    counts_flat = np.bincount(v_i * 20 + v_j, minlength=400).astype(np.float64)
+    mismatches = int(np.sum(v_i != v_j))
+    p = mismatches / n_valid
+
+    if p >= 0.95:
+        d_poisson = max_poisson_dist
+    elif p <= 0.0:
+        d_poisson = 0.0
+    else:
+        d_poisson = -math.log(1.0 - p)
+
+    return counts_flat, d_poisson
+
+
+def _estimate_ml_distances_from_pair_counts(
+    pair_counts: np.ndarray,
+    model: WAGModel,
+    max_dist: float = 5.0,
+) -> np.ndarray:
+    """
+    Vectorized Maximum Likelihood distance estimator under WAG+Gamma for multiple pairs.
+
+    Parameters
+    ----------
+    pair_counts : np.ndarray
+        2D array of shape (n_pairs, 400) containing flattened 20x20 transition counts (sites).
+    model : WAGModel
+        Configured WAG+Gamma substitution model.
+    max_dist : float, default=5.0
+        Maximum allowed ML distance (substitutions/site).
+
+    Returns
+    -------
+    np.ndarray
+        1D array of shape (n_pairs,) with estimated ML distances (substitutions/site).
+    """
+    grid_d, log_P_flat = model.get_marginal_log_prob_grid(max_dist=max_dist, n_grid=500)
+    # Matrix multiplication: (n_pairs, 400) @ (400, n_grid) -> (n_pairs, n_grid)
+    log_L_mat = pair_counts @ log_P_flat.T
+    best_indices = np.argmax(log_L_mat, axis=1)
+
+    n_pairs = pair_counts.shape[0]
+    n_grid = len(grid_d)
+    diag_indices = np.arange(20) * 21  # indices of (a, a) in flattened 20x20
+    total_counts = np.sum(pair_counts, axis=1)
+    ident_counts = np.sum(pair_counts[:, diag_indices], axis=1)
+
+    ml_dists = np.zeros(n_pairs, dtype=np.float64)
+
+    for p_idx in range(n_pairs):
+        if total_counts[p_idx] <= 0 or ident_counts[p_idx] >= total_counts[p_idx]:
+            ml_dists[p_idx] = 0.0
+            continue
+
+        m = int(best_indices[p_idx])
+        if 0 < m < n_grid - 1:
+            # 3-point parabolic refinement around grid peak
+            x0, x1, x2 = grid_d[m - 1], grid_d[m], grid_d[m + 1]
+            y0, y1, y2 = log_L_mat[p_idx, m - 1], log_L_mat[p_idx, m], log_L_mat[p_idx, m + 1]
+            denom = (x0 - x1) * (x0 - x2) * (x1 - x2)
+            if abs(denom) > 1e-15:
+                A = (x2 * (y1 - y0) + x1 * (y0 - y2) + x0 * (y2 - y1)) / denom
+                B = (x2 * x2 * (y0 - y1) + x1 * x1 * (y2 - y0) + x0 * x0 * (y1 - y2)) / denom
+                if A < 0.0:
+                    x_vertex = -B / (2.0 * A)
+                    if x0 <= x_vertex <= x2:
+                        ml_dists[p_idx] = float(x_vertex)
+                        continue
+        ml_dists[p_idx] = float(grid_d[m])
+
+    return ml_dists
+
+
+def compute_pairwise_wag_gamma_distance_matrix(
+    sequences: Dict[str, str],
+    taxa_names: List[str],
+    model: Optional[WAGModel] = None,
+    alpha: float = 1.0,
+    align: bool = True,
+    mode: str = "global",
+    max_dist: float = 5.0,
+) -> np.ndarray:
+    """
+    Computes pairwise Maximum Likelihood evolutionary distance matrix under the WAG+Gamma model.
+
+    Parameters
+    ----------
+    sequences : Dict[str, str]
+        Mapping from taxon name to amino acid sequence.
+    taxa_names : List[str]
+        Ordered list of taxon names (unitless).
+    model : Optional[WAGModel], default=None
+        Pre-initialized WAGModel instance.
+    alpha : float, default=1.0
+        Gamma shape parameter (unitless).
+    align : bool, default=True
+        Whether to perform pairwise sequence alignment before counting transitions.
+    mode : str, default='global'
+        Alignment mode ('global' or 'local').
+    max_dist : float, default=5.0
+        Maximum distance cap (substitutions/site).
+
+    Returns
+    -------
+    np.ndarray
+        Symmetric WAG+Gamma ML distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+    """
+    if model is None or model.alpha != alpha:
+        model = WAGModel(alpha=alpha)
+
+    n = len(taxa_names)
+    n_pairs = n * (n - 1) // 2
+    pair_counts = np.zeros((n_pairs, 400), dtype=np.float64)
+    pair_ij: List[Tuple[int, int]] = []
+
+    aligner = create_pairwise_aligner(mode=mode) if align else None
+
+    p_idx = 0
+    for i in range(n):
+        s_i = sequences[taxa_names[i]]
+        for j in range(i + 1, n):
+            s_j = sequences[taxa_names[j]]
+            if aligner is not None:
+                top_aln = aligner.align(s_i, s_j)[0]
+                aln_i, aln_j = top_aln[0], top_aln[1]
+            else:
+                aln_i, aln_j = s_i, s_j
+
+            counts_flat, _ = _extract_alignment_counts_and_poisson(aln_i, aln_j)
+            pair_counts[p_idx] = counts_flat
+            pair_ij.append((i, j))
+            p_idx += 1
+
+    ml_dists = _estimate_ml_distances_from_pair_counts(pair_counts, model, max_dist=max_dist)
+
+    D_wag = np.zeros((n, n), dtype=np.float64)
+    for (i, j), d_val in zip(pair_ij, ml_dists):
+        D_wag[i, j] = d_val
+        D_wag[j, i] = d_val
+
+    return D_wag
+
+
+def compute_both_pairwise_distance_matrices(
+    sequences: Dict[str, str],
+    taxa_names: List[str],
+    model: Optional[WAGModel] = None,
+    alpha: float = 1.0,
+    mode: str = "global",
+    max_poisson_dist: float = 3.0,
+    max_wag_dist: float = 5.0,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Computes both BLOSUM62+Poisson distance matrix and WAG+Gamma ML distance matrix
+    from a single pass of pairwise global alignments.
+
+    Parameters
+    ----------
+    sequences : Dict[str, str]
+        Mapping from taxon name to amino acid sequence.
+    taxa_names : List[str]
+        Ordered list of taxon names (unitless).
+    model : Optional[WAGModel], default=None
+        Pre-initialized WAGModel instance.
+    alpha : float, default=1.0
+        Gamma shape parameter (unitless).
+    mode : str, default='global'
+        Alignment mode ('global' or 'local').
+    max_poisson_dist : float, default=3.0
+        Maximum cap for Poisson distance (substitutions/site).
+    max_wag_dist : float, default=5.0
+        Maximum cap for WAG+Gamma ML distance (substitutions/site).
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray]
+        - D_blosum62 : Poisson distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+        - D_wag_gamma : WAG+Gamma ML distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+    """
+    if model is None or model.alpha != alpha:
+        model = WAGModel(alpha=alpha)
+
+    n = len(taxa_names)
+    n_pairs = n * (n - 1) // 2
+    pair_counts = np.zeros((n_pairs, 400), dtype=np.float64)
+    pair_ij: List[Tuple[int, int]] = []
+    D_blosum62 = np.zeros((n, n), dtype=np.float64)
+
+    aligner = create_pairwise_aligner(mode=mode)
+
+    p_idx = 0
+    for i in range(n):
+        s_i = sequences[taxa_names[i]]
+        for j in range(i + 1, n):
+            s_j = sequences[taxa_names[j]]
+            top_aln = aligner.align(s_i, s_j)[0]
+            aln_i, aln_j = top_aln[0], top_aln[1]
+
+            counts_flat, d_poisson = _extract_alignment_counts_and_poisson(
+                aln_i, aln_j, max_poisson_dist=max_poisson_dist
+            )
+            pair_counts[p_idx] = counts_flat
+            pair_ij.append((i, j))
+            D_blosum62[i, j] = d_poisson
+            D_blosum62[j, i] = d_poisson
+            p_idx += 1
+
+    ml_dists = _estimate_ml_distances_from_pair_counts(pair_counts, model, max_dist=max_wag_dist)
+
+    D_wag_gamma = np.zeros((n, n), dtype=np.float64)
+    for (i, j), d_val in zip(pair_ij, ml_dists):
+        D_wag_gamma[i, j] = d_val
+        D_wag_gamma[j, i] = d_val
+
+    return D_blosum62, D_wag_gamma
+
+
+def compute_mmseqs_sss_statistics(
+    sequences: Dict[str, str],
+    taxa_names: List[str],
+    sensitivity: float = 7.5,
+    threads: int = 1,
+) -> Optional[Dict[str, float]]:
+    """
+    Computes Sequence Similarity Score (SSS, w_ij) summary statistics using MMseqs2
+    following Matsui & Iwasaki (2020):
+        w_ij = (S_bits(i, j) + S_bits(j, i)) / (S_bits(i, i) + S_bits(j, j))
+    Returns None if MMseqs2 binary is not available in PATH.
+
+    Parameters
+    ----------
+    sequences : Dict[str, str]
+        Mapping from taxon name to amino acid sequence.
+    taxa_names : List[str]
+        Ordered list of taxon names (unitless).
+    sensitivity : float, default=7.5
+        MMseqs2 sensitivity parameter (-s).
+    threads : int, default=1
+        Number of threads for MMseqs2 search.
+
+    Returns
+    -------
+    Optional[Dict[str, float]]
+        Dictionary with 'sss_mean', 'sss_median', 'sss_std', 'sss_min', 'sss_max', 'sss_zero_frac',
+        or None if mmseqs binary is unavailable.
+    """
+    mmseqs_bin = shutil.which("mmseqs")
+    if not mmseqs_bin:
+        candidates = [
+            os.path.join(os.path.dirname(sys.executable), "mmseqs"),
+            os.path.expanduser("~/.micromamba/envs/phylomethod_env/bin/mmseqs"),
+        ]
+        for c in candidates:
+            if os.path.isfile(c) and os.access(c, os.X_OK):
+                mmseqs_bin = c
+                break
+    if not mmseqs_bin:
+        return None
+
+    n = len(taxa_names)
+    if n < 2:
+        return {
+            "sss_mean": 1.0,
+            "sss_median": 1.0,
+            "sss_std": 0.0,
+            "sss_min": 1.0,
+            "sss_max": 1.0,
+            "sss_zero_frac": 0.0,
+        }
+
+    id_map = {name: i for i, name in enumerate(taxa_names)}
+    S = np.zeros((n, n), dtype=np.float64)
+
+    with tempfile.TemporaryDirectory(prefix="mmseqs_sss_") as tmpdir:
+        fasta_path = os.path.join(tmpdir, "seqs.fasta")
+        db = os.path.join(tmpdir, "db")
+        res = os.path.join(tmpdir, "res")
+        tmp = os.path.join(tmpdir, "tmp")
+        out_m8 = os.path.join(tmpdir, "out.m8")
+        os.makedirs(tmp, exist_ok=True)
+
+        with open(fasta_path, "w") as f:
+            for name in taxa_names:
+                f.write(f">{name}\n{sequences[name]}\n")
+
+        try:
+            subprocess.run(
+                [mmseqs_bin, "createdb", fasta_path, db],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            subprocess.run(
+                [mmseqs_bin, "search", db, db, res, tmp, "--threads", str(threads), "-e", "10", "-s", str(sensitivity)],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            subprocess.run(
+                [mmseqs_bin, "convertalis", db, db, res, out_m8, "--format-mode", "0"],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+        except Exception:
+            return None
+
+        if os.path.exists(out_m8):
+            with open(out_m8, "r") as f:
+                for line in f:
+                    parts = line.strip().split("\t")
+                    if len(parts) >= 12:
+                        q, t = parts[0], parts[1]
+                        if q in id_map and t in id_map:
+                            try:
+                                bits = float(parts[11])
+                            except ValueError:
+                                bits = 0.0
+                            qi, ti = id_map[q], id_map[t]
+                            if bits > S[qi, ti]:
+                                S[qi, ti] = bits
+
+    scores: List[float] = []
+    w_lba_pair = 0.0
+    for i in range(n):
+        for j in range(i + 1, n):
+            self_score = S[i, i] + S[j, j]
+            comp_score = S[i, j] + S[j, i]
+            w_ij = (comp_score / self_score) if self_score > 0.0 else 0.0
+            w_clamped = min(1.0, max(0.0, float(w_ij)))
+            scores.append(w_clamped)
+            if i == 0 and j == n - 1:
+                w_lba_pair = w_clamped
+
+    arr = np.array(scores, dtype=np.float64)
+    return {
+        "sss_mean": float(np.mean(arr)),
+        "sss_median": float(np.median(arr)),
+        "sss_std": float(np.std(arr)),
+        "sss_min": float(np.min(arr)),
+        "sss_max": float(np.max(arr)),
+        "sss_zero_frac": float(np.mean(arr <= 1e-6)),
+        "sss_lba_pair": float(w_lba_pair),
+    }
+
+
+def compute_all_pairwise_matrices_and_sss(
+    sequences: Dict[str, str],
+    taxa_names: List[str],
+    model: Optional[WAGModel] = None,
+    alpha: float = 1.0,
+    mode: str = "global",
+    max_poisson_dist: float = 3.0,
+    max_wag_dist: float = 5.0,
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    """
+    Computes BLOSUM62+Poisson distance matrix, WAG+Gamma ML distance matrix,
+    and Sequence Similarity Score (SSS) statistics in a single pass.
+
+    SSS (w_ij) is computed both from normalized pairwise alignment scores
+    w_ij = 2 * S(i, j) / (S(i, i) + S(j, j)) in [0, 1] and (if MMseqs2 is installed)
+    from MMseqs2 bit-scores matching Matsui & Iwasaki (2020).
+
+    Parameters
+    ----------
+    sequences : Dict[str, str]
+        Mapping from taxon name to amino acid sequence.
+    taxa_names : List[str]
+        Ordered list of taxon names (unitless).
+    model : Optional[WAGModel], default=None
+        Pre-initialized WAGModel instance.
+    alpha : float, default=1.0
+        Gamma shape parameter (unitless).
+    mode : str, default='global'
+        Alignment mode ('global' or 'local').
+    max_poisson_dist : float, default=3.0
+        Maximum cap for Poisson distance (substitutions/site).
+    max_wag_dist : float, default=5.0
+        Maximum cap for WAG+Gamma ML distance (substitutions/site).
+
+    Returns
+    -------
+    Tuple[np.ndarray, np.ndarray, Dict[str, float]]
+        - D_blosum62 : Poisson distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+        - D_wag_gamma : WAG+Gamma ML distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+        - sss_stats : Dictionary with 'sss_mean', 'sss_median', 'sss_std', 'sss_min', 'sss_max',
+          'sss_zero_frac', 'psa_sss_mean', and 'seq_identity_mean' (unitless).
+    """
+    if model is None or model.alpha != alpha:
+        model = WAGModel(alpha=alpha)
+
+    n = len(taxa_names)
+    n_pairs = n * (n - 1) // 2
+    pair_counts = np.zeros((n_pairs, 400), dtype=np.float64)
+    pair_ij: List[Tuple[int, int]] = []
+    D_blosum62 = np.zeros((n, n), dtype=np.float64)
+
+    aligner = create_pairwise_aligner(mode=mode)
+    # Also use local aligner with BLOSUM62 for non-negative Smith-Waterman similarity score S_local(i, j)
+    local_aligner = create_pairwise_aligner(mode="local")
+    self_scores = np.array(
+        [float(local_aligner.score(sequences[name], sequences[name])) for name in taxa_names],
+        dtype=np.float64,
+    )
+
+    psa_w_scores: List[float] = []
+    identities: List[float] = []
+    psa_w_lba: float = 0.0
+
+    p_idx = 0
+    for i in range(n):
+        s_i = sequences[taxa_names[i]]
+        for j in range(i + 1, n):
+            s_j = sequences[taxa_names[j]]
+            top_aln = aligner.align(s_i, s_j)[0]
+            aln_i, aln_j = top_aln[0], top_aln[1]
+
+            counts_flat, d_poisson = _extract_alignment_counts_and_poisson(
+                aln_i, aln_j, max_poisson_dist=max_poisson_dist
+            )
+            pair_counts[p_idx] = counts_flat
+            pair_ij.append((i, j))
+            D_blosum62[i, j] = d_poisson
+            D_blosum62[j, i] = d_poisson
+
+            # Sequence identity = exp(-d_poisson) when d_poisson < max_poisson_dist
+            tot_sites = float(np.sum(counts_flat))
+            ident_sites = float(np.sum(counts_flat[np.arange(20) * 21]))
+            identities.append(ident_sites / tot_sites if tot_sites > 0 else 0.0)
+
+            # Normalized Smith-Waterman similarity score w_ij in [0, 1]
+            denom = self_scores[i] + self_scores[j]
+            if denom > 0.0:
+                loc_score = float(local_aligner.score(s_i, s_j))
+                w_ij = min(1.0, max(0.0, (2.0 * loc_score) / denom))
+            else:
+                w_ij = 0.0
+            psa_w_scores.append(w_ij)
+            if i == 0 and j == n - 1:
+                psa_w_lba = w_ij
+            p_idx += 1
+
+    ml_dists = _estimate_ml_distances_from_pair_counts(pair_counts, model, max_dist=max_wag_dist)
+
+    D_wag_gamma = np.zeros((n, n), dtype=np.float64)
+    for (i, j), d_val in zip(pair_ij, ml_dists):
+        D_wag_gamma[i, j] = d_val
+        D_wag_gamma[j, i] = d_val
+
+    psa_arr = np.array(psa_w_scores, dtype=np.float64) if psa_w_scores else np.array([0.0])
+    ident_arr = np.array(identities, dtype=np.float64) if identities else np.array([0.0])
+
+    # Check if MMseqs2 is available for exact MMseqs2 SSS; otherwise use Smith-Waterman PSA SSS
+    mmseqs_stats = compute_mmseqs_sss_statistics(sequences, taxa_names)
+    if mmseqs_stats is not None:
+        sss_stats = dict(mmseqs_stats)
+    else:
+        sss_stats = {
+            "sss_mean": float(np.mean(psa_arr)),
+            "sss_median": float(np.median(psa_arr)),
+            "sss_std": float(np.std(psa_arr)),
+            "sss_min": float(np.min(psa_arr)),
+            "sss_max": float(np.max(psa_arr)),
+            "sss_zero_frac": float(np.mean(psa_arr <= 1e-6)),
+            "sss_lba_pair": float(psa_w_lba) if n >= 2 else 0.0,
+        }
+
+    sss_stats["psa_sss_mean"] = float(np.mean(psa_arr))
+    sss_stats["psa_sss_median"] = float(np.median(psa_arr))
+    sss_stats["psa_sss_std"] = float(np.std(psa_arr))
+    sss_stats["psa_sss_min"] = float(np.min(psa_arr))
+    sss_stats["psa_sss_max"] = float(np.max(psa_arr))
+    sss_stats["psa_sss_lba_pair"] = float(psa_w_lba) if n >= 2 else 0.0
+    sss_stats["seq_identity_mean"] = float(np.mean(ident_arr))
+
+    return D_blosum62, D_wag_gamma, sss_stats
+
+
 

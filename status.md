@@ -1,3 +1,28 @@
+最終更新: 2026-11-11 05:06
+
+## 📈 進捗状況
+- [x] 完了: WAG+Gamma最尤推定距離行列（`compute_pairwise_wag_gamma_distance_matrix`）およびSSS類似度（`compute_all_pairwise_matrices_and_sss`）の実装・単体テスト (完了日: 11/11)
+- [x] 完了: `TreeScorer` の $N=128$ 対応高速化・系統樹の4点条件違反度一括評価機能の実装 (完了日: 11/11)
+- [x] 完了: スパコン（LSF）向け統合ベンチマークスクリプト `benchmark_hpc.py`（BLOSUM62 / WAG+Gamma / True距離行列、全Newick保存、4点条件違反度、SSS算出、rep=30）の実装・ドライラン検証 (完了日: 11/11)
+- [x] 完了: LSFジョブアレイ投入スクリプト `scripts/submit_lsf.sh` および結果マージ・可視化スクリプト `analysis/merge_and_plot_hpc.py` の実装 (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**:
+  1. $N=20, 32, 64, 128$ 全条件を統一反復数（`rep=30`）で揃え、$N=128$ においても `Add-NNI` 探索を実行する必要がある。
+  2. 従来のBLOSUM62+ポアソン距離だけでなく、シミュレーション真の進化モデルに合致した「WAG+$\Gamma$ 最尤推定距離行列」および「真のPatristic距離行列」での比較が必要。
+  3. 各手法で構築された系統樹（Newick）の保存、系統樹の4点条件違反度 $\mathcal{L}(T; D)$ の算出、および配列類似度スコア（SSS）の記録が必要。
+- **[解決策]**:
+  1. `src/sequence_simulator.py` に固有値分解と事前計算グリッド＋放物線補間を用いた高速WAG+$\Gamma$最尤距離推定器およびSSS統計量算出関数を実装。
+  2. `src/topology_search.py` の `TreeScorer` に `itertools.islice` による確定的な均一カルテットサンプリングを導入し、$N=128$ でもメモリ爆発なく高速に `Add-NNI` および4点条件違反度評価を実行可能にした。
+  3. `scripts/submit_lsf.sh` にて `#BSUB -J add_phylo[1-12]` ジョブアレイを構成し、全12条件（4 Taxa $\times$ 3 Divergence）をスパコン上で同時並列実行できるようにした。
+- **[パラメータ]**: $N \in \{20, 32, 64, 128\}$, $D \in \{0.5, 1.0, 2.0\}$, $L=500$ aa, WAG+Gamma ($\alpha=1.0$), `replicates=30`, 距離行列 $\in \{\text{blosum62}, \text{wag\_gamma}, \text{true}\}$.
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン（LSF環境）にて `git pull` 後、`mkdir -p logs && bsub < scripts/submit_lsf.sh` でジョブアレイを投入
+2. 全12ジョブ完了後、`python analysis/merge_and_plot_hpc.py --outdir results_hpc` を実行して統合CSVと全グラフを生成
+
+---
+
 最終更新: 2026-11-11 04:35
 
 ## 📈 進捗状況

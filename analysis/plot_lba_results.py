@@ -1,11 +1,13 @@
 """
-Publication-Quality Visualization Script for LBA (Long Branch Attraction) Benchmark.
+Publication-Quality Visualization Script for LBA (Long Branch Attraction) Benchmark
+across Multiple Distance Matrices (BLOSUM62+Poisson, WAG+Gamma ML, True Patristic)
+with SSS and 4-Point Condition Violation Analysis.
 
 Plots:
-1. Shortest path edge distance DS(T1, TN) across methods (Control vs LBA).
-2. False Sister Rate (% of trials where T1 and TN are erroneously inferred as sister taxa, DS=2).
-3. Overall topological error (nRF) under Control vs LBA.
-4. Computational runtime comparison across methods.
+1. nRF comparison across the 3 distance matrices (BLOSUM62, WAG+Gamma, True) for Control vs LBA.
+2. Shortest path edge distance DS(T1, TN) across all 15 methods (Control vs LBA).
+3. Sequence Similarity Score (SSS) and 4-Point Condition Violation (Delta_ADD & Tree Penalty).
+4. False Sister Rate (%) and Computational Runtime Comparison.
 """
 
 from typing import List, Dict, Tuple, Optional
@@ -38,7 +40,6 @@ METHOD_SPECS = [
 def plot_lba_ds_comparison(df: pd.DataFrame, outdir: str = "results_lba") -> None:
     """
     Plots the topological shortest path edge distance DS(T1, TN) between long branches.
-    Shows the dramatic drop toward DS=2 when LBA occurs, and how well each method resists.
     """
     os.makedirs(outdir, exist_ok=True)
     taxa_list = sorted(df["n_taxa"].unique())
@@ -52,7 +53,7 @@ def plot_lba_ds_comparison(df: pd.DataFrame, outdir: str = "results_lba") -> Non
         fig, axes = plt.subplots(
             len(lba_ratios),
             len(divergences),
-            figsize=(6 * len(divergences), 4.5 * len(lba_ratios)),
+            figsize=(6.2 * len(divergences), 4.6 * len(lba_ratios)),
             dpi=300,
             sharey="row",
         )
@@ -97,7 +98,7 @@ def plot_lba_ds_comparison(df: pd.DataFrame, outdir: str = "results_lba") -> Non
                     sems.append(np.std(vals, ddof=1) / np.sqrt(len(vals)) if len(vals) > 1 else 0.0)
 
                 colors = [m[2] for m in methods]
-                bars = ax.bar(x_positions, means, yerr=sems, capsize=3, color=colors, alpha=0.85, edgecolor="black", linewidth=0.5)
+                ax.bar(x_positions, means, yerr=sems, capsize=3, color=colors, alpha=0.85, edgecolor="black", linewidth=0.5)
 
                 title_lba = "Control (No LBA, ratio=1.0)" if lba_r == 1.0 else f"LBA Condition (ratio={lba_r})"
                 ax.set_title(f"N={n_taxa}, D={div} | {title_lba}", fontsize=11, fontweight="bold")
@@ -119,6 +120,126 @@ def plot_lba_ds_comparison(df: pd.DataFrame, outdir: str = "results_lba") -> Non
         print(f"[OK] Saved DS comparison plot: {out_path}")
 
 
+def plot_lba_nrf_by_matrix(df: pd.DataFrame, outdir: str = "results_lba") -> None:
+    """
+    Plots nRF comparison across the 3 distance matrices (BLOSUM62+Poisson, WAG+Gamma, True)
+    and MSA+ML under LBA (ratio=3.0) vs Control (ratio=1.0).
+    """
+    os.makedirs(outdir, exist_ok=True)
+    taxa_list = sorted(df["n_taxa"].unique())
+    divergences = sorted(df["divergence"].unique())
+    dist_methods = [spec for spec in METHOD_SPECS if spec[0] != "MSA_ML" and f"blosum62_{spec[0]}_nrf" in df.columns]
+
+    for n_taxa in taxa_list:
+        sub_df = df[df["n_taxa"] == n_taxa]
+        fig, axes = plt.subplots(2, len(divergences), figsize=(6.5 * len(divergences), 9.5), dpi=300, sharey="row")
+
+        for r_idx, lba_r in enumerate([1.0, 3.0]):
+            for d_idx, div in enumerate(divergences):
+                ax = axes[r_idx, d_idx]
+                cell_df = sub_df[(sub_df["divergence"] == div) & (sub_df["lba_ratio"] == lba_r)]
+                if cell_df.empty:
+                    continue
+
+                x_pos = np.arange(len(dist_methods))
+                width = 0.27
+
+                b_means = [cell_df[f"blosum62_{m[0]}_nrf"].mean() for m in dist_methods]
+                w_means = [cell_df[f"wag_gamma_{m[0]}_nrf"].mean() for m in dist_methods]
+                t_means = [cell_df[f"true_{m[0]}_nrf"].mean() for m in dist_methods]
+
+                ax.bar(x_pos - width, b_means, width, label="BLOSUM62 + Poisson", color="#1f77b4", alpha=0.88, edgecolor="black", linewidth=0.4)
+                ax.bar(x_pos, w_means, width, label="WAG + Gamma (ML Dist)", color="#ff7f0e", alpha=0.88, edgecolor="black", linewidth=0.4)
+                ax.bar(x_pos + width, t_means, width, label="True Patristic Dist", color="#2ca02c", alpha=0.88, edgecolor="black", linewidth=0.4)
+
+                if "MSA_ML_nrf" in cell_df.columns:
+                    ml_mean = cell_df["MSA_ML_nrf"].mean()
+                    ax.axhline(ml_mean, color="#d62728", linestyle="--", linewidth=1.3, label=f"MSA+ML (FastTree: {ml_mean:.3f})")
+
+                lba_label = "Control (ratio=1.0)" if lba_r == 1.0 else "LBA (ratio=3.0)"
+                ax.set_title(f"N={n_taxa}, D={div} | {lba_label}", fontsize=10.5, fontweight="bold")
+                ax.set_xticks(x_pos)
+                ax.set_xticklabels([m[1] for m in dist_methods], rotation=45, ha="right", fontsize=7.5)
+                if d_idx == 0:
+                    ax.set_ylabel("Normalized Robinson-Foulds (nRF)", fontsize=10)
+                    ax.legend(loc="upper right", fontsize=7.5)
+                ax.grid(axis="y", linestyle=":", alpha=0.6)
+
+        plt.tight_layout()
+        out_path = os.path.join(outdir, f"lba_nrf_by_matrix_N{n_taxa}.png")
+        plt.savefig(out_path, dpi=300, bbox_inches="tight")
+        plt.close()
+        print(f"[OK] Saved matrix-comparison nRF plot: {out_path}")
+
+
+def plot_sss_and_four_point_defect(df: pd.DataFrame, outdir: str = "results_lba") -> None:
+    """
+    Plots Sequence Similarity Score (SSS) and 4-Point Condition Violation (Delta_ADD)
+    across conditions (N, D, LBA ratio).
+    """
+    os.makedirs(outdir, exist_ok=True)
+    fig, axes = plt.subplots(1, 3, figsize=(17, 5), dpi=300)
+
+    cond_labels = []
+    sss_all_means, sss_lba_means = [], []
+    fp_blosum_means, fp_wag_means, fp_true_means = [], [], []
+    pen_nj_b, pen_addnj2_b, pen_hyb_b = [], [], []
+
+    for (n_taxa, div, lba_r), grp in df.groupby(["n_taxa", "divergence", "lba_ratio"]):
+        lbl = f"N{n_taxa}\nD{div}\nL{lba_r:.0f}"
+        cond_labels.append(lbl)
+        sss_all_means.append(grp["sss_mean"].mean())
+        sss_lba_means.append(grp["sss_lba_pair"].mean() if "sss_lba_pair" in grp else 0.0)
+        fp_blosum_means.append(grp["delta_add_blosum62"].mean())
+        fp_wag_means.append(grp["delta_add_wag_gamma"].mean())
+        fp_true_means.append(grp["delta_add_true"].mean())
+        pen_nj_b.append(grp["blosum62_Standard_NJ_penalty_obs"].mean())
+        pen_addnj2_b.append(grp["blosum62_AddNJ2_penalty_obs"].mean())
+        pen_hyb_b.append(grp["blosum62_AddNJ2_Add_Hybrid_penalty_obs"].mean())
+
+    x = np.arange(len(cond_labels))
+    w = 0.35
+
+    # Panel 1: SSS
+    axes[0].bar(x - w / 2, sss_all_means, w, label="Mean SSS (All Pairs)", color="#1f77b4", edgecolor="black", linewidth=0.5)
+    axes[0].bar(x + w / 2, sss_lba_means, w, label="LBA Pair SSS w(T1, TN)", color="#d62728", edgecolor="black", linewidth=0.5)
+    axes[0].set_title("Sequence Similarity Score (SSS)", fontsize=11, fontweight="bold")
+    axes[0].set_xticks(x)
+    axes[0].set_xticklabels(cond_labels, fontsize=7.5)
+    axes[0].set_ylabel("SSS (w_ij in [0, 1])", fontsize=10)
+    axes[0].legend(fontsize=8.5)
+    axes[0].grid(axis="y", linestyle=":", alpha=0.6)
+
+    # Panel 2: Matrix 4-Point Condition Defect Delta_ADD(D)
+    axes[1].bar(x - w, fp_blosum_means, w, label="BLOSUM62+Poisson", color="#1f77b4", edgecolor="black", linewidth=0.5)
+    axes[1].bar(x, fp_wag_means, w, label="WAG+Gamma ML", color="#ff7f0e", edgecolor="black", linewidth=0.5)
+    axes[1].bar(x + w, fp_true_means, w, label="True Patristic (0.0)", color="#2ca02c", edgecolor="black", linewidth=0.5)
+    axes[1].set_title("Matrix 4-Point Condition Defect (Delta_ADD)", fontsize=11, fontweight="bold")
+    axes[1].set_xticks(x)
+    axes[1].set_xticklabels(cond_labels, fontsize=7.5)
+    axes[1].set_ylabel("Relative Additivity Defect Delta_ADD(D)", fontsize=10)
+    axes[1].legend(fontsize=8.5)
+    axes[1].grid(axis="y", linestyle=":", alpha=0.6)
+
+    # Panel 3: Tree Quartet Additivity Penalty L(T | D_obs)
+    w3 = 0.27
+    axes[2].bar(x - w3, pen_nj_b, w3, label="Standard NJ", color="#1f77b4", edgecolor="black", linewidth=0.5)
+    axes[2].bar(x, pen_addnj2_b, w3, label="AddNJ2", color="#9467bd", edgecolor="black", linewidth=0.5)
+    axes[2].bar(x + w3, pen_hyb_b, w3, label="AddNJ2 + Add-Hybrid", color="#800080", edgecolor="black", linewidth=0.5)
+    axes[2].set_title("Tree Quartet Additivity Penalty L(T | D_obs)", fontsize=11, fontweight="bold")
+    axes[2].set_xticks(x)
+    axes[2].set_xticklabels(cond_labels, fontsize=7.5)
+    axes[2].set_ylabel("Quartet Additivity Penalty L(T)", fontsize=10)
+    axes[2].legend(fontsize=8.5)
+    axes[2].grid(axis="y", linestyle=":", alpha=0.6)
+
+    plt.tight_layout()
+    out_path = os.path.join(outdir, "lba_4pc_violation_and_sss.png")
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[OK] Saved SSS and 4PC violation plot: {out_path}")
+
+
 def plot_lba_sister_rate(df: pd.DataFrame, outdir: str = "results_lba") -> None:
     """
     Plots the False Sister Rate (%) indicating direct Long Branch Attraction artifact occurrence.
@@ -126,7 +247,6 @@ def plot_lba_sister_rate(df: pd.DataFrame, outdir: str = "results_lba") -> None:
     os.makedirs(outdir, exist_ok=True)
     lba_df = df[df["lba_ratio"] > 1.0]
     if lba_df.empty:
-        print("[WARN] No LBA ratio > 1.0 found for sister rate plotting.")
         return
 
     taxa_list = sorted(lba_df["n_taxa"].unique())
@@ -197,7 +317,7 @@ def plot_lba_nrf_comparison(df: pd.DataFrame, outdir: str = "results_lba") -> No
 
     for n_taxa in taxa_list:
         sub_df = df[df["n_taxa"] == n_taxa]
-        fig, axes = plt.subplots(1, len(divergences), figsize=(6 * len(divergences), 5.5), dpi=300, sharey=True)
+        fig, axes = plt.subplots(1, len(divergences), figsize=(6.2 * len(divergences), 5.5), dpi=300, sharey=True)
 
         if len(divergences) == 1:
             axes = [axes]
@@ -248,7 +368,7 @@ def plot_lba_runtime(df: pd.DataFrame, outdir: str = "results_lba") -> None:
         labels.append(m[1])
         colors.append(m[2])
 
-    fig, ax = plt.subplots(figsize=(10, 5), dpi=300)
+    fig, ax = plt.subplots(figsize=(10, 5.5), dpi=300)
     y_pos = np.arange(len(methods))
     bars = ax.barh(y_pos, mean_times, color=colors, alpha=0.85, edgecolor="black", linewidth=0.5)
 
@@ -260,7 +380,7 @@ def plot_lba_runtime(df: pd.DataFrame, outdir: str = "results_lba") -> None:
     ax.set_yticklabels(labels, fontsize=9)
     ax.set_xscale("log")
     ax.set_xlabel("Mean Execution Time per Tree [seconds] (log scale)", fontsize=10)
-    ax.set_title("Computational Runtime Comparison across All Methods", fontsize=11, fontweight="bold")
+    ax.set_title("Computational Runtime Comparison across All 15 Methods", fontsize=11, fontweight="bold")
     ax.grid(axis="x", linestyle=":", alpha=0.6)
 
     plt.tight_layout()
@@ -271,8 +391,10 @@ def plot_lba_runtime(df: pd.DataFrame, outdir: str = "results_lba") -> None:
 
 
 def generate_all_lba_plots(df: pd.DataFrame, outdir: str = "results_lba") -> None:
-    """Generates all 4 publication charts."""
+    """Generates all publication charts."""
     plot_lba_ds_comparison(df, outdir)
+    plot_lba_nrf_by_matrix(df, outdir)
+    plot_sss_and_four_point_defect(df, outdir)
     plot_lba_sister_rate(df, outdir)
     plot_lba_nrf_comparison(df, outdir)
     plot_lba_runtime(df, outdir)

@@ -1,3 +1,22 @@
+最終更新: 2026-11-11 06:56
+
+## 📈 進捗状況
+- [x] 完了: LBAベンチマーク v2（3種距離行列 blosum62/wag_gamma/true × 14距離法 + MSA_ML、FastME-NNI追加）(完了日: 11/11)
+- [x] 完了: SSS（MMseqs2, 長枝ペア w(T1,TN) 含む）と4点条件違反度（行列Δ_ADD・木L(T)）の算出 (完了日: 11/11)
+- [x] 完了: 全5,280本の系統樹・配列の保存（results_lba/trees/, all_inferred_trees.csv）(完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: `compute_mmseqs_sss_statistics` が PATH 上の mmseqs のみ探索し、未活性環境で SW 代替にフォールバックしていた。
+- **[解決策]**: sys.executable 隣接および phylomethod_env の mmseqs を探索するよう修正。hill_climb_search に penalty≈0 での早期終了を追加（true行列で無駄なSPR探索を回避）。Hybrid は NNI 結果から SPR を継続する形に変更し重複計算を削減。
+- **[結果]**: true行列では全手法 nRF=0（実装妥当性確認）。WAG+Γ距離はRMSE小だが Δ_ADD 大で nRF は Poisson と同等〜悪化。AddNJ2 と NJ の LBA 増分差は SEM 内（10反復では有意差なし）。
+- **[パラメータ]**: N∈{20,32}, D∈{0.5,1.0,2.0}, lba_ratio∈{1.0,3.0}, L=500, WAG+Γ α=1.0, 10 reps, seed=42。
+
+## 🚀 次に行うこと (Next Actions)
+1. 有意差検定のため反復数を増やす: `python benchmark_lba.py --replicates 50 --outdir results_lba_r50`
+2. lba_ratio を 5.0 などに拡張し偽姉妹群が多発する領域で手法差を評価
+
+---
+
 最終更新: 2026-11-11 05:06
 
 ## 📈 進捗状況

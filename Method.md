@@ -146,3 +146,10 @@ $$
    加法性に基づく手法（AddNJ2）は、4点条件の不等式整合度（$S_1 \le \min(S_2, S_3)$）のみで結合ペアを選択するため、長枝の絶対値増大に惑わされにくく、従来のNJやBioNJよりも高いLBA耐性を発揮します。
 
 
+
+### 5.4 LBA拡張ベンチマーク v2: 距離行列・SSS・4点条件違反度
+- **距離行列3種**: `blosum62`（BLOSUM62 Global PSA + Poisson補正 $d=-\ln(1-p)$）、`wag_gamma`（PSAの20×20置換カウントから WAG+Γ(α=1.0) 下で最尤距離をグリッド探索＋放物線補間で推定）、`true`（真の木のパトリスティック距離）。
+- **SSS**: MMseqs2 (`-s 7.5 -e 10`) の bit score $S$ から $w_{ij} = \frac{S(i,j)+S(j,i)}{S(i,i)+S(j,j)}$。MMseqs2 不在時は Smith-Waterman 正規化スコアで代替（`psa_sss_*` 列は常に併記）。`sss_lba_pair` は長枝ペア $w(T_1,T_N)$。
+- **4点条件違反度**: 行列レベル $\Delta_{\text{ADD}}(D)$（`delta_add_*`）および木レベル $\mathcal{L}(T\mid D)$（`*_penalty_obs`, `*_penalty_true`）。
+- **系統樹保存**: `results_lba/trees/N{N}_D{D}_LBA{r}/rep_XXX/{true_tree.nwk, sequences.fasta, MSA_ML.nwk, <matrix>/<method>.nwk}`。
+- 実行: `python benchmark_lba.py --threads 6` → `python analysis/plot_lba_results.py`

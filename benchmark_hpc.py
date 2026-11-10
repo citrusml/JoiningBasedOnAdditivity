@@ -47,13 +47,14 @@ if hasattr(sys.stderr, "reconfigure"):
 DISTANCE_METHODS = [
     "Standard_NJ",
     "BioNJ",
+    "FastME_NNI",
     "FastME_SPR",
     "AddNJ2",
     "BioNJ_Add_NNI",
     "AddNJ2_Add_NNI",
 ]
 
-MATRIX_TYPES = ["blosum62", "wag_gamma", "true"]
+MATRIX_TYPES = ["blosum62", "wag_gamma", "sss_linear", "sss_log", "true"]
 
 
 def run_distance_methods_on_matrix(
@@ -63,7 +64,7 @@ def run_distance_methods_on_matrix(
     max_nni_iter: int = 20,
 ) -> Dict[str, Tuple[str, float]]:
     """
-    Runs all 6 distance-based tree reconstruction methods on a given distance matrix.
+    Runs all 7 distance-based tree reconstruction methods on a given distance matrix.
 
     Parameters
     ----------
@@ -94,23 +95,28 @@ def run_distance_methods_on_matrix(
     t_bionj = time.time() - t0
     outputs["BioNJ"] = (bionj_nwk, t_bionj)
 
-    # 3. FastME-SPR
+    # 3. FastME-NNI
+    t0 = time.time()
+    fnni_nwk = run_fastme(D_mat, taxa_names, method="nni")
+    outputs["FastME_NNI"] = (fnni_nwk, time.time() - t0)
+
+    # 4. FastME-SPR
     t0 = time.time()
     fspr_nwk = run_fastme(D_mat, taxa_names, method="spr")
     outputs["FastME_SPR"] = (fspr_nwk, time.time() - t0)
 
-    # 4. AddNJ2 (Sister-Quartet Consistency)
+    # 5. AddNJ2 (Sister-Quartet Consistency)
     t0 = time.time()
     addnj2_nwk = add_nj2(D_mat, taxa_names)
     t_addnj2 = time.time() - t0
     outputs["AddNJ2"] = (addnj2_nwk, t_addnj2)
 
-    # 5. BioNJ + Add-NNI
+    # 6. BioNJ + Add-NNI
     t0 = time.time()
     bionj_nni_nwk, _ = hill_climb_search(bionj_nwk, scorer_search, mode="nni", max_iter=max_nni_iter)
     outputs["BioNJ_Add_NNI"] = (bionj_nni_nwk, t_bionj + (time.time() - t0))
 
-    # 6. AddNJ2 + Add-NNI
+    # 7. AddNJ2 + Add-NNI
     t0 = time.time()
     addnj2_nni_nwk, _ = hill_climb_search(addnj2_nwk, scorer_search, mode="nni", max_iter=max_nni_iter)
     outputs["AddNJ2_Add_NNI"] = (addnj2_nni_nwk, t_addnj2 + (time.time() - t0))
@@ -125,13 +131,14 @@ def run_hpc_benchmark_condition(
     rep_start: int = 1,
     rep_end: int = 30,
     alpha: float = 1.0,
+    indel_rate: float = 0.0,
     outdir: str = "results_hpc",
     seed: int = 42,
     nni_max_quartets: int = 25000,
     eval_max_quartets: int = 100000,
 ) -> pd.DataFrame:
     """
-    Executes the full HPC benchmark for a specific (n_taxa, divergence) condition
+    Executes the full HPC benchmark for a specific (n_taxa, divergence, indel_rate) condition
     across replicates [rep_start, rep_end].
 
     Parameters
@@ -148,6 +155,8 @@ def run_hpc_benchmark_condition(
         Ending replicate index (1-based, inclusive).
     alpha : float, default=1.0
         Gamma rate heterogeneity shape parameter (unitless).
+    indel_rate : float, default=0.0
+        Zipfian (POW 1.7 50) insertion/deletion rate via INDELible (unitless, e.g. 0.0, 0.05, 0.1).
     outdir : str, default='results_hpc'
         Output root directory path.
     seed : int, default=42
@@ -167,18 +176,20 @@ def run_hpc_benchmark_condition(
     os.makedirs(shards_dir, exist_ok=True)
     os.makedirs(trees_dir, exist_ok=True)
 
-    tag = f"N{n_taxa}_D{divergence}_R{rep_start}_{rep_end}"
+    indel_suffix = f"_I{indel_rate}" if indel_rate > 0.0 else ""
+    tag = f"N{n_taxa}_D{divergence}{indel_suffix}_R{rep_start}_{rep_end}"
     csv_path = os.path.join(shards_dir, f"summary_{tag}.csv")
     jsonl_tree_path = os.path.join(trees_dir, f"trees_{tag}.jsonl")
     if os.path.exists(jsonl_tree_path):
         os.remove(jsonl_tree_path)
 
-
     wag = WAGModel(wag_path="src/wag.dat", alpha=alpha)
     records: List[Dict[str, Any]] = []
 
     print("=" * 88)
-    print(f"HPC PHYLOMETRICS BENCHMARK | N={n_taxa} | D={divergence} | Reps={rep_start}..{rep_end}")
+    print(
+        f"HPC PHYLOMETRICS BENCHMARK | N={n_taxa} | D={divergence} | Indel={indel_rate} | Reps={rep_start}..{rep_end}"
+    )
     print("=" * 88)
 
     for rep in range(rep_start, rep_end + 1):
@@ -192,29 +203,38 @@ def run_hpc_benchmark_condition(
         true_newick = tree.to_newick() + ";"
         D_true = compute_patristic_distance_matrix(tree, taxa_names)
 
-        # 2. Simulate WAG+Gamma Sequences
+        # 2. Simulate WAG+Gamma Sequences (with Zipfian Indels via INDELible when indel_rate > 0)
         seqs = simulate_wag_gamma_sequences(
             root=tree,
             seq_length=seq_length,
             alpha=alpha,
             model=wag,
             seed=rep_seed + 1,
+            indel_rate=indel_rate,
         )
 
-        # 3. Compute BLOSUM62+Poisson matrix, WAG+Gamma ML matrix, and SSS statistics
+        # 3. Compute BLOSUM62+Poisson matrix, WAG+Gamma ML matrix, and Exp 18 SSS distance matrices
         t_mat0 = time.time()
-        D_blosum62, D_wag_gamma, sss_stats = compute_all_pairwise_matrices_and_sss(
-            seqs, taxa_names, model=wag, alpha=alpha, mode="global"
+        (
+            D_blosum62,
+            D_wag_gamma,
+            sss_stats,
+            D_sss_linear,
+            D_sss_log,
+        ) = compute_all_pairwise_matrices_and_sss(
+            seqs, taxa_names, model=wag, alpha=alpha, mode="global", return_sss_matrices=True
         )
         dist_calc_time = time.time() - t_mat0
 
         matrices: Dict[str, np.ndarray] = {
             "blosum62": D_blosum62,
             "wag_gamma": D_wag_gamma,
+            "sss_linear": D_sss_linear,
+            "sss_log": D_sss_log,
             "true": D_true,
         }
 
-        # 4. Initialize evaluation scorers (shared quartet index set across all 3 matrices)
+        # 4. Initialize evaluation scorers (shared quartet index set across all matrices)
         eval_scorers: Dict[str, TreeScorer] = {
             m_type: TreeScorer(D_mat, taxa_names, max_quartets=eval_max_quartets)
             for m_type, D_mat in matrices.items()
@@ -232,13 +252,14 @@ def run_hpc_benchmark_condition(
             "replicate": rep,
             "n_taxa": n_taxa,
             "divergence": divergence,
+            "indel_rate": float(indel_rate),
             "seq_length": seq_length,
             "dist_calc_time_sec": float(dist_calc_time),
         }
         row.update(sss_stats)
 
         # Distance matrix accuracy & intrinsic 4-point condition defect Delta_ADD(D)
-        for m_type in ["blosum62", "wag_gamma"]:
+        for m_type in [m for m in MATRIX_TYPES if m != "true"]:
             acc = evaluate_matrix_accuracy(matrices[m_type], D_true)
             row[f"rmse_{m_type}"] = acc["rmse"]
             row[f"mae_{m_type}"] = acc["mae"]
@@ -260,9 +281,11 @@ def run_hpc_benchmark_condition(
         ml_time = time.time() - t0
         saved_trees_rep["MSA_ML"] = ml_nwk
 
-        ml_rf_res = evaluate_tree_rf(ml_nwk, true_newick, taxa_names)
+        ml_rf_res = evaluate_tree_rf(ml_nwk, true_newick, taxa_names, D_true=D_true)
         row["MSA_ML_nrf"] = float(ml_rf_res["nrf"])
         row["MSA_ML_rf"] = float(ml_rf_res["rf"])
+        row["MSA_ML_kf_bsd"] = float(ml_rf_res["kf_bsd"])
+        row["MSA_ML_patristic_rmse"] = float(ml_rf_res["patristic_rmse"])
         row["MSA_ML_time"] = float(ml_time)
 
         ml_choices = eval_scorers["true"].extract_tree_quartet_choices(ml_nwk)
@@ -282,9 +305,11 @@ def run_hpc_benchmark_condition(
                 col_prefix = f"{m_type}_{m_name}"
                 saved_trees_rep[col_prefix] = inferred_nwk
 
-                eval_res = evaluate_tree_rf(inferred_nwk, true_newick, taxa_names)
+                eval_res = evaluate_tree_rf(inferred_nwk, true_newick, taxa_names, D_true=D_true)
                 row[f"{col_prefix}_nrf"] = float(eval_res["nrf"])
                 row[f"{col_prefix}_rf"] = float(eval_res["rf"])
+                row[f"{col_prefix}_kf_bsd"] = float(eval_res["kf_bsd"])
+                row[f"{col_prefix}_patristic_rmse"] = float(eval_res["patristic_rmse"])
                 row[f"{col_prefix}_time"] = float(runtime)
 
                 # Extract quartet splits induced by inferred tree once and score wrt D_obs and D_true
@@ -301,6 +326,7 @@ def run_hpc_benchmark_condition(
                     {
                         "n_taxa": n_taxa,
                         "divergence": divergence,
+                        "indel_rate": float(indel_rate),
                         "replicate": rep,
                         "trees": saved_trees_rep,
                     }
@@ -308,7 +334,7 @@ def run_hpc_benchmark_condition(
                 + "\n"
             )
 
-        rep_tree_dir = os.path.join(trees_dir, f"N{n_taxa}_D{divergence}", f"rep_{rep:03d}")
+        rep_tree_dir = os.path.join(trees_dir, f"N{n_taxa}_D{divergence}{indel_suffix}", f"rep_{rep:03d}")
         os.makedirs(rep_tree_dir, exist_ok=True)
         for t_label, nwk_str in saved_trees_rep.items():
             with open(os.path.join(rep_tree_dir, f"{t_label}.nwk"), "w") as tf:
@@ -319,11 +345,13 @@ def run_hpc_benchmark_condition(
 
         elapsed = time.time() - t_rep_start
         print(
-            f"  [N={n_taxa:3d}, D={divergence}, Rep {rep:2d}/{rep_end}] "
+            f"  [N={n_taxa:3d}, D={divergence}, Indel={indel_rate}, Rep {rep:2d}/{rep_end}] "
             f"SSS={row['sss_mean']:.3f} | "
             f"ML={row['MSA_ML_nrf']:.3f} | "
-            f"BLOSUM(NJ={row['blosum62_Standard_NJ_nrf']:.3f}, BioNJ={row['blosum62_BioNJ_nrf']:.3f}, AddNJ2={row['blosum62_AddNJ2_nrf']:.3f}, BioNJ+NNI={row['blosum62_BioNJ_Add_NNI_nrf']:.3f}) | "
-            f"WAG(NJ={row['wag_gamma_Standard_NJ_nrf']:.3f}, BioNJ={row['wag_gamma_BioNJ_nrf']:.3f}, AddNJ2={row['wag_gamma_AddNJ2_nrf']:.3f}, BioNJ+NNI={row['wag_gamma_BioNJ_Add_NNI_nrf']:.3f}) | "
+            f"BLOSUM(NJ={row['blosum62_Standard_NJ_nrf']:.3f}, AddNJ2={row['blosum62_AddNJ2_nrf']:.3f}) | "
+            f"WAG(NJ={row['wag_gamma_Standard_NJ_nrf']:.3f}, AddNJ2={row['wag_gamma_AddNJ2_nrf']:.3f}) | "
+            f"SSS_lin(NJ={row['sss_linear_Standard_NJ_nrf']:.3f}, AddNJ2={row['sss_linear_AddNJ2_nrf']:.3f}) | "
+            f"SSS_log(NJ={row['sss_log_Standard_NJ_nrf']:.3f}, AddNJ2={row['sss_log_AddNJ2_nrf']:.3f}) | "
             f"TRUE(AddNJ2={row['true_AddNJ2_nrf']:.3f}) "
             f"({elapsed:.1f}s)"
         )
@@ -339,6 +367,13 @@ if __name__ == "__main__":
     )
     parser.add_argument("--taxa", type=int, nargs="+", default=[20, 32, 64, 128], help="Taxa sizes N")
     parser.add_argument("--divergence", type=float, nargs="+", default=[0.5, 1.0, 2.0], help="Divergence levels D")
+    parser.add_argument(
+        "--indel-rate",
+        type=float,
+        nargs="+",
+        default=[0.0],
+        help="Zipfian (POW 1.7 50) insertion/deletion rates via INDELible (e.g. 0.05 0.1)",
+    )
     parser.add_argument("--length", type=int, default=500, help="Amino acid sequence length L")
     parser.add_argument("--replicates", type=int, default=30, help="Total replicates per condition")
     parser.add_argument("--rep-start", type=int, default=1, help="Start replicate index (1-based)")
@@ -349,15 +384,17 @@ if __name__ == "__main__":
 
     rep_end = args.rep_end if args.rep_end is not None else args.replicates
 
-    for n_val in args.taxa:
-        for d_val in args.divergence:
-            run_hpc_benchmark_condition(
-                n_taxa=n_val,
-                divergence=d_val,
-                seq_length=args.length,
-                rep_start=args.rep_start,
-                rep_end=rep_end,
-                outdir=args.outdir,
-                seed=args.seed,
-            )
+    for indel_val in args.indel_rate:
+        for n_val in args.taxa:
+            for d_val in args.divergence:
+                run_hpc_benchmark_condition(
+                    n_taxa=n_val,
+                    divergence=d_val,
+                    seq_length=args.length,
+                    rep_start=args.rep_start,
+                    rep_end=rep_end,
+                    indel_rate=indel_val,
+                    outdir=args.outdir,
+                    seed=args.seed,
+                )
 

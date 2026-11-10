@@ -8,7 +8,7 @@ Implements:
 4. Amino acid Poisson correction distance calculation: d = -ln(1 - p).
 """
 
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 import os
 import sys
 import math
@@ -199,34 +199,212 @@ class WAGModel:
         return float(np.dot(counts_flat, np.log(P_marg).ravel()))
 
 
+_INDELIBLE_BIN_CACHE: Optional[str] = None
+
+
+def find_or_build_indelible_binary() -> str:
+    """
+    Locates a working INDELible v1.03 binary for the current OS/architecture,
+    or builds one via `scripts/install_indelible.sh` if necessary.
+
+    Returns
+    -------
+    str
+        Absolute path to the executable INDELible binary.
+    """
+    global _INDELIBLE_BIN_CACHE
+    if _INDELIBLE_BIN_CACHE and os.path.isfile(_INDELIBLE_BIN_CACHE) and os.access(_INDELIBLE_BIN_CACHE, os.X_OK):
+        return _INDELIBLE_BIN_CACHE
+
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    candidates = [
+        shutil.which("indelible"),
+        os.path.join(repo_root, "bin", "indelible"),
+        os.path.abspath(os.path.join(repo_root, "..", "PhyloTree_Methods_Comparison", "bin", "indelible")),
+    ]
+
+    for cand in candidates:
+        if cand and os.path.isfile(cand) and os.access(cand, os.X_OK):
+            try:
+                res = subprocess.run(
+                    [cand],
+                    input="\n",
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                out_str = (res.stdout or "") + (res.stderr or "")
+                if "INDELible" in out_str:
+                    _INDELIBLE_BIN_CACHE = cand
+                    return cand
+            except Exception:
+                continue
+
+    # Build via scripts/install_indelible.sh
+    install_script = os.path.join(repo_root, "scripts", "install_indelible.sh")
+    if os.path.isfile(install_script):
+        subprocess.run(["bash", install_script], check=True)
+        built_bin = os.path.join(repo_root, "bin", "indelible")
+        if os.path.isfile(built_bin) and os.access(built_bin, os.X_OK):
+            _INDELIBLE_BIN_CACHE = built_bin
+            return built_bin
+
+    raise RuntimeError("Could not find or build a working INDELible binary.")
+
+
+def simulate_indelible_wag_gamma_sequences(
+    root: SimTreeNode,
+    seq_length: int = 500,
+    alpha: float = 1.0,
+    indel_rate: float = 0.05,
+    indel_power: float = 1.7,
+    indel_max_len: int = 50,
+    seed: Optional[int] = None,
+) -> Dict[str, str]:
+    """
+    Simulates amino acid sequence evolution with Zipfian (power-law) insertions and
+    deletions using INDELible v1.03 under WAG + discrete 4-category Gamma, matching
+    Matsui & Iwasaki (2020) and `PhyloTree_Methods_Comparison`.
+
+    Parameters
+    ----------
+    root : SimTreeNode
+        Root node of the phylogenetic tree.
+    seq_length : int, default=500
+        Root amino acid sequence length L (residues).
+    alpha : float, default=1.0
+        Shape parameter of discrete 4-category Gamma rate heterogeneity (unitless).
+    indel_rate : float, default=0.05
+        Insertion and deletion rate relative to substitution rate (e.g., 0.05 or 0.10, unitless).
+    indel_power : float, default=1.7
+        Zipfian power-law exponent a for `POW a M` indel length distribution (unitless).
+    indel_max_len : int, default=50
+        Maximum indel length M for `POW a M` distribution (residues).
+    seed : Optional[int], default=None
+        Random seed for deterministic simulation (unitless).
+
+    Returns
+    -------
+    Dict[str, str]
+        Mapping from taxon leaf name to unaligned evolved amino acid sequence string.
+    """
+    indelible_bin = find_or_build_indelible_binary()
+    tree_str = root.to_newick().strip()
+    if not tree_str.endswith(";"):
+        tree_str += ";"
+
+    expected_leaves: List[str] = []
+
+    def _collect_leaves(node: SimTreeNode) -> None:
+        if node.is_leaf():
+            expected_leaves.append(node.name)
+            return
+        if node.left:
+            _collect_leaves(node.left)
+        if node.right:
+            _collect_leaves(node.right)
+
+    _collect_leaves(root)
+    n_expected = len(expected_leaves)
+    base_seed = int(seed) if seed is not None else 12345
+
+    for attempt in range(5):
+        cur_seed = abs(base_seed + attempt * 100003) % 2147483647
+        if cur_seed == 0:
+            cur_seed = 42
+
+        with tempfile.TemporaryDirectory(prefix="indelible_sim_") as tmpdir:
+            control_content = (
+                "[TYPE] AMINOACID 1\n"
+                "[SETTINGS]\n"
+                f"  [randomseed] {cur_seed}\n"
+                "  [output] FASTA\n"
+                "[MODEL] mymodel\n"
+                "  [submodel] WAG\n"
+                f"  [rates] 0 {alpha} 4\n"
+                f"  [insertmodel] POW {indel_power} {indel_max_len}\n"
+                f"  [deletemodel] POW {indel_power} {indel_max_len}\n"
+                f"  [insertrate] {indel_rate}\n"
+                f"  [deleterate] {indel_rate}\n"
+                f"[TREE] mytree {tree_str}\n"
+                f"[PARTITIONS] mypart [mytree mymodel {seq_length}]\n"
+                "[EVOLVE] mypart 1 sim\n"
+            )
+            ctrl_path = os.path.join(tmpdir, "control.txt")
+            with open(ctrl_path, "w") as f:
+                f.write(control_content)
+
+            proc = subprocess.run(
+                [indelible_bin],
+                cwd=tmpdir,
+                capture_output=True,
+                text=True,
+            )
+            fas_path = os.path.join(tmpdir, "sim.fas")
+            if proc.returncode == 0 and os.path.isfile(fas_path):
+                seqs: Dict[str, str] = {}
+                for rec in SeqIO.parse(fas_path, "fasta"):
+                    s_clean = str(rec.seq).replace("-", "").replace(" ", "").strip().upper()
+                    if len(s_clean) > 0:
+                        seqs[rec.id] = s_clean
+                if len(seqs) == n_expected and all(k in seqs for k in expected_leaves):
+                    return seqs
+
+    raise RuntimeError(
+        f"INDELible simulation failed to produce valid non-empty sequences for all {n_expected} taxa after 5 attempts."
+    )
+
+
 def simulate_wag_gamma_sequences(
     root: SimTreeNode,
     seq_length: int = 300,
     alpha: float = 1.0,
     model: Optional[WAGModel] = None,
     seed: Optional[int] = None,
+    indel_rate: float = 0.0,
+    indel_power: float = 1.7,
+    indel_max_len: int = 50,
 ) -> Dict[str, str]:
     """
-    Simulates amino acid sequences along a tree under WAG + Gamma.
+    Simulates amino acid sequences along a tree under WAG + Gamma, optionally with
+    Zipfian insertions and deletions via INDELible when `indel_rate > 0.0`.
 
     Parameters
     ----------
     root : SimTreeNode
         Root node of the phylogenetic tree.
     seq_length : int, default=300
-        Length of amino acid alignment L (residues).
+        Length of root amino acid sequence L (residues).
     alpha : float, default=1.0
-        Shape parameter of Gamma rate distribution.
+        Shape parameter of Gamma rate distribution (unitless).
     model : Optional[WAGModel], default=None
         Pre-initialized WAGModel. If None, initialized with alpha.
     seed : Optional[int], default=None
-        Random seed.
+        Random seed (unitless).
+    indel_rate : float, default=0.0
+        Insertion/deletion rate relative to substitution rate (0.0 for substitution-only,
+        or e.g. 0.05 / 0.10 for INDELible Zipfian indels, unitless).
+    indel_power : float, default=1.7
+        Zipfian power-law exponent a for `POW a M` indel length model (unitless).
+    indel_max_len : int, default=50
+        Maximum indel length M for `POW a M` indel length model (residues).
 
     Returns
     -------
     Dict[str, str]
         Mapping from taxon leaf name to amino acid sequence string.
     """
+    if indel_rate > 0.0:
+        return simulate_indelible_wag_gamma_sequences(
+            root=root,
+            seq_length=seq_length,
+            alpha=alpha,
+            indel_rate=indel_rate,
+            indel_power=indel_power,
+            indel_max_len=indel_max_len,
+            seed=seed,
+        )
+
     if model is None or model.alpha != alpha:
         model = WAGModel(alpha=alpha)
 
@@ -714,17 +892,16 @@ def compute_both_pairwise_distance_matrices(
     return D_blosum62, D_wag_gamma
 
 
-def compute_mmseqs_sss_statistics(
+def compute_mmseqs_similarity_matrix(
     sequences: Dict[str, str],
     taxa_names: List[str],
     sensitivity: float = 7.5,
     threads: int = 1,
-) -> Optional[Dict[str, float]]:
+) -> Optional[Tuple[np.ndarray, Dict[str, float]]]:
     """
-    Computes Sequence Similarity Score (SSS, w_ij) summary statistics using MMseqs2
-    following Matsui & Iwasaki (2020):
+    Computes all-to-all MMseqs2 symmetrical relative sequence similarity score w_ij
+    matrix and summary statistics following Matsui & Iwasaki (2020) and Exp 18:
         w_ij = (S_bits(i, j) + S_bits(j, i)) / (S_bits(i, i) + S_bits(j, j))
-    Returns None if MMseqs2 binary is not available in PATH.
 
     Parameters
     ----------
@@ -739,9 +916,9 @@ def compute_mmseqs_sss_statistics(
 
     Returns
     -------
-    Optional[Dict[str, float]]
-        Dictionary with 'sss_mean', 'sss_median', 'sss_std', 'sss_min', 'sss_max', 'sss_zero_frac',
-        or None if mmseqs binary is unavailable.
+    Optional[Tuple[np.ndarray, Dict[str, float]]]
+        - w_mat : (N, N) symmetrical relative similarity matrix in [0.0, 1.0] with w_ii = 1.0.
+        - summary_stats : Summary statistics dictionary, or None if MMseqs2 is unavailable.
     """
     mmseqs_bin = shutil.which("mmseqs")
     if not mmseqs_bin:
@@ -757,14 +934,17 @@ def compute_mmseqs_sss_statistics(
         return None
 
     n = len(taxa_names)
+    w_mat = np.zeros((n, n), dtype=np.float64)
+    np.fill_diagonal(w_mat, 1.0)
     if n < 2:
-        return {
+        return w_mat, {
             "sss_mean": 1.0,
             "sss_median": 1.0,
             "sss_std": 0.0,
             "sss_min": 1.0,
             "sss_max": 1.0,
             "sss_zero_frac": 0.0,
+            "sss_lba_pair": 1.0,
         }
 
     id_map = {name: i for i, name in enumerate(taxa_names)}
@@ -780,7 +960,7 @@ def compute_mmseqs_sss_statistics(
 
         with open(fasta_path, "w") as f:
             for name in taxa_names:
-                f.write(f">{name}\n{sequences[name]}\n")
+                f.write(f">{name}\n{sequences[name].replace('-', '').upper()}\n")
 
         try:
             subprocess.run(
@@ -821,12 +1001,14 @@ def compute_mmseqs_sss_statistics(
             comp_score = S[i, j] + S[j, i]
             w_ij = (comp_score / self_score) if self_score > 0.0 else 0.0
             w_clamped = min(1.0, max(0.0, float(w_ij)))
+            w_mat[i, j] = w_clamped
+            w_mat[j, i] = w_clamped
             scores.append(w_clamped)
             if i == 0 and j == n - 1:
                 w_lba_pair = w_clamped
 
     arr = np.array(scores, dtype=np.float64)
-    return {
+    stats = {
         "sss_mean": float(np.mean(arr)),
         "sss_median": float(np.median(arr)),
         "sss_std": float(np.std(arr)),
@@ -835,6 +1017,69 @@ def compute_mmseqs_sss_statistics(
         "sss_zero_frac": float(np.mean(arr <= 1e-6)),
         "sss_lba_pair": float(w_lba_pair),
     }
+    return w_mat, stats
+
+
+def compute_mmseqs_sss_statistics(
+    sequences: Dict[str, str],
+    taxa_names: List[str],
+    sensitivity: float = 7.5,
+    threads: int = 1,
+) -> Optional[Dict[str, float]]:
+    """
+    Computes Sequence Similarity Score (SSS, w_ij) summary statistics using MMseqs2
+    following Matsui & Iwasaki (2020):
+        w_ij = (S_bits(i, j) + S_bits(j, i)) / (S_bits(i, i) + S_bits(j, j))
+    Returns None if MMseqs2 binary is not available in PATH.
+    """
+    res = compute_mmseqs_similarity_matrix(sequences, taxa_names, sensitivity=sensitivity, threads=threads)
+    if res is None:
+        return None
+    return res[1]
+
+
+def similarity_to_distance_matrix(
+    w_mat: np.ndarray,
+    dist_model: str = "linear",
+    epsilon: float = 1e-4,
+) -> np.ndarray:
+    """
+    Converts a symmetrical relative sequence similarity matrix w_ij in [0, 1]
+    into an evolutionary distance matrix d_ij matching Matsui & Iwasaki (2020) and Exp 18.
+
+    Parameters
+    ----------
+    w_mat : np.ndarray
+        (N, N) symmetrical relative sequence similarity matrix in [0.0, 1.0] (unitless).
+    dist_model : str, default="linear"
+        Transformation formula:
+        - 'linear' / 'mmseqs_linear' / 'sss_linear': d_ij = 1.0 - w_ij (unitless in [0, 1])
+        - 'log' / 'mmseqs_log' / 'sss_log':          d_ij = -ln(max(w_ij, epsilon)) (unitless)
+    epsilon : float, default=1e-4
+        Small positive floor for logarithmic transformation when w_ij == 0 (unitless).
+
+    Returns
+    -------
+    d_mat : np.ndarray
+        (N, N) symmetrical pairwise distance matrix with zero diagonal (unitless).
+    """
+    n = w_mat.shape[0]
+    d_mat = np.zeros((n, n), dtype=np.float64)
+    mode = dist_model.lower().strip()
+    is_linear = mode in ("linear", "mmseqs_linear", "sss_linear", "sss")
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            w = float(w_mat[i, j])
+            if is_linear:
+                d_val = max(0.0, 1.0 - w)
+            else:
+                eff_w = max(w, epsilon)
+                d_val = max(0.0, -math.log(eff_w))
+            d_mat[i, j] = d_val
+            d_mat[j, i] = d_val
+
+    return d_mat
 
 
 def compute_all_pairwise_matrices_and_sss(
@@ -845,14 +1090,17 @@ def compute_all_pairwise_matrices_and_sss(
     mode: str = "global",
     max_poisson_dist: float = 3.0,
     max_wag_dist: float = 5.0,
-) -> Tuple[np.ndarray, np.ndarray, Dict[str, float]]:
+    return_sss_matrices: bool = False,
+) -> Union[
+    Tuple[np.ndarray, np.ndarray, Dict[str, float]],
+    Tuple[np.ndarray, np.ndarray, Dict[str, float], np.ndarray, np.ndarray],
+]:
     """
     Computes BLOSUM62+Poisson distance matrix, WAG+Gamma ML distance matrix,
-    and Sequence Similarity Score (SSS) statistics in a single pass.
+    Sequence Similarity Score (SSS) statistics, and optionally SSS distance matrices (Exp 18).
 
-    SSS (w_ij) is computed both from normalized pairwise alignment scores
-    w_ij = 2 * S(i, j) / (S(i, i) + S(j, j)) in [0, 1] and (if MMseqs2 is installed)
-    from MMseqs2 bit-scores matching Matsui & Iwasaki (2020).
+    SSS (w_ij) is computed from MMseqs2 bit-scores matching Matsui & Iwasaki (2020) and Exp 18,
+    or falls back to normalized Smith-Waterman local alignment scores if MMseqs2 is unavailable.
 
     Parameters
     ----------
@@ -870,14 +1118,18 @@ def compute_all_pairwise_matrices_and_sss(
         Maximum cap for Poisson distance (substitutions/site).
     max_wag_dist : float, default=5.0
         Maximum cap for WAG+Gamma ML distance (substitutions/site).
+    return_sss_matrices : bool, default=False
+        If True, also returns (D_sss_linear, D_sss_log) computed via Exp 18 transformations.
 
     Returns
     -------
-    Tuple[np.ndarray, np.ndarray, Dict[str, float]]
+    Union[Tuple[3], Tuple[5]]
         - D_blosum62 : Poisson distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
         - D_wag_gamma : WAG+Gamma ML distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
         - sss_stats : Dictionary with 'sss_mean', 'sss_median', 'sss_std', 'sss_min', 'sss_max',
           'sss_zero_frac', 'psa_sss_mean', and 'seq_identity_mean' (unitless).
+        - (Optional if return_sss_matrices=True) D_sss_linear : d_ij = 1 - w_ij (Exp 18 linear SSS distance).
+        - (Optional if return_sss_matrices=True) D_sss_log : d_ij = -ln(max(w_ij, eps)) (Exp 18 log SSS distance).
     """
     if model is None or model.alpha != alpha:
         model = WAGModel(alpha=alpha)
@@ -887,6 +1139,8 @@ def compute_all_pairwise_matrices_and_sss(
     pair_counts = np.zeros((n_pairs, 400), dtype=np.float64)
     pair_ij: List[Tuple[int, int]] = []
     D_blosum62 = np.zeros((n, n), dtype=np.float64)
+    w_mat_psa = np.zeros((n, n), dtype=np.float64)
+    np.fill_diagonal(w_mat_psa, 1.0)
 
     aligner = create_pairwise_aligner(mode=mode)
     # Also use local aligner with BLOSUM62 for non-negative Smith-Waterman similarity score S_local(i, j)
@@ -929,6 +1183,8 @@ def compute_all_pairwise_matrices_and_sss(
             else:
                 w_ij = 0.0
             psa_w_scores.append(w_ij)
+            w_mat_psa[i, j] = w_ij
+            w_mat_psa[j, i] = w_ij
             if i == 0 and j == n - 1:
                 psa_w_lba = w_ij
             p_idx += 1
@@ -944,10 +1200,11 @@ def compute_all_pairwise_matrices_and_sss(
     ident_arr = np.array(identities, dtype=np.float64) if identities else np.array([0.0])
 
     # Check if MMseqs2 is available for exact MMseqs2 SSS; otherwise use Smith-Waterman PSA SSS
-    mmseqs_stats = compute_mmseqs_sss_statistics(sequences, taxa_names)
-    if mmseqs_stats is not None:
-        sss_stats = dict(mmseqs_stats)
+    mmseqs_res = compute_mmseqs_similarity_matrix(sequences, taxa_names)
+    if mmseqs_res is not None:
+        w_mat, sss_stats = mmseqs_res
     else:
+        w_mat = w_mat_psa
         sss_stats = {
             "sss_mean": float(np.mean(psa_arr)),
             "sss_median": float(np.median(psa_arr)),
@@ -965,6 +1222,12 @@ def compute_all_pairwise_matrices_and_sss(
     sss_stats["psa_sss_max"] = float(np.max(psa_arr))
     sss_stats["psa_sss_lba_pair"] = float(psa_w_lba) if n >= 2 else 0.0
     sss_stats["seq_identity_mean"] = float(np.mean(ident_arr))
+
+    D_sss_linear = similarity_to_distance_matrix(w_mat, dist_model="linear")
+    D_sss_log = similarity_to_distance_matrix(w_mat, dist_model="log", epsilon=1e-4)
+
+    if return_sss_matrices:
+        return D_blosum62, D_wag_gamma, sss_stats, D_sss_linear, D_sss_log
 
     return D_blosum62, D_wag_gamma, sss_stats
 

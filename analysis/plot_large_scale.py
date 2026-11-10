@@ -44,7 +44,7 @@ def plot_benchmark_results(
         ("Standard_NJ", "Standard NJ", "#1f77b4", "s"),
         ("BioNJ", "BioNJ", "#ff7f0e", "^"),
         ("FastME_SPR", "FastME-SPR", "#2ca02c", "D"),
-        ("AddNJ2", "AddNJ2 (Proposed)", "#9467bd", "P"),
+        ("AddNJ2", "AddNJ2", "#9467bd", "P"),
         ("BioNJ_Add_NNI", "BioNJ + Add-NNI", "#8c564b", "v"),
         ("AddNJ2_Add_NNI", "AddNJ2 + Add-NNI", "#e377c2", "X"),
     ]

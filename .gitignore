@@ -1,7 +1,14 @@
 # Auto-generated data and results
 data/
 results*/
+bin/
+logs/
 __pycache__/
 *.pyc
 .pytest_cache/
 .DS_Store
+# INDELible artifacts
+LOG.txt
+trees.txt
+control.txt
+

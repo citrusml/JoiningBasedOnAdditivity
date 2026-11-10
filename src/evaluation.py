@@ -104,13 +104,64 @@ def evaluate_four_point_metrics(
     }
 
 
+def compute_tree_patristic_matrix(
+    tree: dendropy.Tree,
+    n_taxa: int,
+) -> np.ndarray:
+    """
+    Computes the pairwise leaf-to-leaf patristic distance matrix from an unrooted
+    DendroPy tree with encoded bipartitions using vectorized split-incidence multiplication.
+
+    Parameters
+    ----------
+    tree : dendropy.Tree
+        Unrooted DendroPy tree with `encode_bipartitions()` already called.
+    n_taxa : int
+        Number of terminal taxa in the tree namespace (unitless).
+
+    Returns
+    -------
+    np.ndarray
+        Symmetric patristic distance matrix of shape (n_taxa, n_taxa) in substitutions/site.
+    """
+    edges_b: List[float] = []
+    edges_m: List[np.ndarray] = []
+    all_ones = (1 << n_taxa) - 1
+
+    for edge in tree.postorder_edge_iter():
+        if edge.bipartition is None or edge.length is None:
+            continue
+        b_val = float(edge.length)
+        if b_val == 0.0:
+            continue
+        bm = edge.bipartition.split_bitmask
+        if bm == 0 or bm == all_ones:
+            continue
+        row = np.array([(bm >> i) & 1 for i in range(n_taxa)], dtype=np.float64)
+        edges_b.append(b_val)
+        edges_m.append(row)
+
+    if not edges_b:
+        return np.zeros((n_taxa, n_taxa), dtype=np.float64)
+
+    M = np.array(edges_m, dtype=np.float64)  # (E, N)
+    b = np.array(edges_b, dtype=np.float64)  # (E,)
+    wM = M * b[:, None]
+    one_minus_M = 1.0 - M
+    D_pat = wM.T @ one_minus_M + one_minus_M.T @ wM
+    np.fill_diagonal(D_pat, 0.0)
+    return D_pat
+
+
 def evaluate_tree_rf(
     est_tree_newick: str,
     true_tree_newick: str,
     taxa_names: List[str],
+    D_true: Optional[np.ndarray] = None,
 ) -> Dict[str, float]:
     """
-    Computes unrooted Robinson-Foulds (RF) distance and normalized RF (nRF).
+    Computes unrooted Robinson-Foulds (RF) distance, normalized RF (nRF),
+    Kuhner-Felsenstein Branch Score Distance (KF / BSD), and Patristic Distance RMSE.
 
     Parameters
     ----------
@@ -119,12 +170,19 @@ def evaluate_tree_rf(
     true_tree_newick : str
         Newick string of ground truth tree.
     taxa_names : List[str]
-        List of taxa names.
+        List of taxa names (unitless).
+    D_true : Optional[np.ndarray], default=None
+        Precomputed ground-truth patristic distance matrix of shape (n_taxa, n_taxa)
+        in substitutions/site. If None, computed directly from `true_tree_newick`.
 
     Returns
     -------
     Dict[str, float]
-        Dictionary with 'rf' (symmetric difference) and 'nrf' (normalized RF, [0, 1]).
+        Dictionary with:
+        - 'rf': Robinson-Foulds symmetric difference (unitless).
+        - 'nrf': Normalized RF distance in [0, 1] (unitless).
+        - 'kf_bsd': Kuhner-Felsenstein Branch Score Distance (substitutions/site).
+        - 'patristic_rmse': Root Mean Square Error of tree patristic distances vs true tree (substitutions/site).
     """
     n_taxa = len(taxa_names)
     tns = dendropy.TaxonNamespace(taxa_names)
@@ -136,9 +194,21 @@ def evaluate_tree_rf(
     max_rf = 2 * (n_taxa - 3) if n_taxa > 3 else 1
     nrf = rf / max_rf if max_rf > 0 else 0.0
 
+    # Kuhner-Felsenstein (1994) Branch Score Distance (BSD)
+    kf_bsd = float(treecompare.euclidean_distance(t_est, t_true))
+
+    # Patristic Distance RMSE between inferred tree and true tree
+    D_pat_est = compute_tree_patristic_matrix(t_est, n_taxa)
+    D_pat_true = D_true if D_true is not None else compute_tree_patristic_matrix(t_true, n_taxa)
+    triu_idx = np.triu_indices(n_taxa, k=1)
+    diff = D_pat_est[triu_idx] - D_pat_true[triu_idx]
+    patristic_rmse = float(np.sqrt(np.mean(diff ** 2))) if len(diff) > 0 else 0.0
+
     return {
         "rf": rf,
         "nrf": float(nrf),
+        "kf_bsd": kf_bsd,
+        "patristic_rmse": patristic_rmse,
     }
 
 
@@ -242,6 +312,8 @@ def evaluate_tree_lba(
     return {
         "rf": rf_res["rf"],
         "nrf": rf_res["nrf"],
+        "kf_bsd": rf_res["kf_bsd"],
+        "patristic_rmse": rf_res["patristic_rmse"],
         "ds_est": float(ds_est),
         "ds_true": float(ds_true),
         "delta_ds": float(delta_ds),

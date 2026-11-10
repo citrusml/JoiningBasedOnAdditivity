@@ -276,33 +276,101 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
 
     divergences = sorted(df["divergence"].unique())
 
-    # 1. Figure 1: Mean nRF vs Divergence
-    plt.figure(figsize=(12, 6), dpi=300)
-    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+    # 1. Figure 1: Mean nRF vs Divergence (Error Bar Plot: Full Scale & Zoomed Scale)
+    markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "p", "*", "h", "H", "d"]
+    colors = plt.cm.tab20(np.linspace(0, 1, len(methods)))
 
     x = np.arange(len(divergences))
     n_methods = len(methods)
-    width = 0.8 / n_methods
+    dodge_offsets = np.linspace(-0.35, 0.35, n_methods)
 
-    # Color palette
-    colors = plt.cm.tab20(np.linspace(0, 1, n_methods))
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.5, 6.2), dpi=300)
+    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
 
+    # Panel 1: Full scale including all methods
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    lines = []
     for idx, (m, lbl) in enumerate(zip(methods, labels)):
         means = [df[df["divergence"] == d][f"{m}_nrf"].mean() for d in divergences]
         sems = [df[df["divergence"] == d][f"{m}_nrf"].sem() for d in divergences]
-        offset = (idx - n_methods / 2) * width + width / 2
-        plt.bar(x + offset, means, yerr=sems, width=width, label=lbl, color=colors[idx], capsize=2, alpha=0.9)
+        eb = ax1.errorbar(
+            x + dodge_offsets[idx],
+            means,
+            yerr=sems,
+            fmt=markers[idx % len(markers)],
+            color=colors[idx],
+            label=lbl,
+            markersize=8,
+            capsize=3.5,
+            capthick=1.2,
+            elinewidth=1.2,
+            markeredgecolor="black",
+            markeredgewidth=0.6,
+            linestyle="none",
+            alpha=0.95,
+        )
+        lines.append(eb)
 
-    plt.xlabel("Tree Divergence Scale (substitutions/site)", fontsize=13, fontweight="bold")
-    plt.ylabel("Normalized Robinson-Foulds Distance (nRF)", fontsize=13, fontweight="bold")
-    plt.title("Phylogenetic Accuracy Across Divergence Levels (N=20, L=500 aa, 10 reps)", fontsize=14, fontweight="bold")
-    plt.xticks(x, [f"D = {d}" for d in divergences], fontsize=12)
-    plt.ylim(0, max(0.5, df[[f"{m}_nrf" for m in methods]].values.max() * 1.15))
-    plt.legend(bbox_to_anchor=(1.02, 1), loc="upper left", fontsize=10, frameon=True)
-    plt.tight_layout()
+    ax1.set_xlabel("Tree Divergence Scale (substitutions/site)", fontsize=12, fontweight="bold", labelpad=8)
+    ax1.set_ylabel("Normalized Robinson-Foulds Distance (nRF)", fontsize=12, fontweight="bold", labelpad=8)
+    ax1.set_title("(a) All Evaluated Methods (Full Scale)", fontsize=13, fontweight="bold", pad=10)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
+    ax1.set_ylim(-0.02, 0.85)
+    for sep in [0.5, 1.5]:
+        ax1.axvline(sep, color="gray", linestyle=":", alpha=0.3)
+
+    # Panel 2: Zoomed-in scale for competitive methods (excluding naive AddNJ outlier, keeping same dodge positions)
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    for idx, (m, lbl) in enumerate(zip(methods, labels)):
+        if m == "AddNJ":
+            continue
+        means = [df[df["divergence"] == d][f"{m}_nrf"].mean() for d in divergences]
+        sems = [df[df["divergence"] == d][f"{m}_nrf"].sem() for d in divergences]
+        ax2.errorbar(
+            x + dodge_offsets[idx],
+            means,
+            yerr=sems,
+            fmt=markers[idx % len(markers)],
+            color=colors[idx],
+            label=lbl,
+            markersize=8,
+            capsize=3.5,
+            capthick=1.2,
+            elinewidth=1.2,
+            markeredgecolor="black",
+            markeredgewidth=0.6,
+            linestyle="none",
+            alpha=0.95,
+        )
+
+    ax2.set_xlabel("Tree Divergence Scale (substitutions/site)", fontsize=12, fontweight="bold", labelpad=8)
+    ax2.set_ylabel("Normalized Robinson-Foulds Distance (nRF)", fontsize=12, fontweight="bold", labelpad=8)
+    ax2.set_title("(b) Competitive Methods (Zoomed Scale)", fontsize=13, fontweight="bold", pad=10)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
+    ax2.set_ylim(-0.005, 0.17)
+    for sep in [0.5, 1.5]:
+        ax2.axvline(sep, color="gray", linestyle=":", alpha=0.3)
+
+    # Place legend in the dedicated right margin with explicit Left-to-Right cluster ordering
+    fig.legend(
+        handles=lines,
+        labels=labels,
+        title="Reconstruction Methods\n(Left-to-Right in cluster)",
+        title_fontsize=10.5,
+        loc="center left",
+        bbox_to_anchor=(0.825, 0.5),
+        fontsize=9.5,
+        frameon=True,
+        framealpha=0.95,
+        edgecolor="#cccccc",
+    )
+    fig.suptitle("Phylogenetic Reconstruction Accuracy Across Divergence Levels (N=20, L=500 aa, 10 reps, Mean ± SEM)", fontsize=13.5, fontweight="bold", y=0.97)
+    plt.subplots_adjust(left=0.07, right=0.81, top=0.88, bottom=0.12, wspace=0.22)
 
     fig1_path = os.path.join(outdir, "nrf_comparison.png")
-    plt.savefig(fig1_path, dpi=300)
+    plt.savefig(fig1_path, dpi=300, bbox_inches="tight")
     plt.close()
     print(f"[OK] Saved figure: {fig1_path}")
 

@@ -1,3 +1,48 @@
+最終更新: 2026-11-11 08:35
+
+## 📈 進捗状況
+- [x] 完了: `results/nrf_comparison.png` の棒グラフからエラーバープロット（散布図＋Mean ± SEM、水平ドッジ）への刷新 (完了日: 11/11)
+- [x] 完了: `main.py` 内 `generate_plots` の改修（全手法表示のFull Scale (a) ＋ 競合手法高解像度表示のZoomed Scale (b) の2パネル構成） (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 従来の棒グラフ（`plt.bar`）では14手法が発散度ごとに密集して重なり、またナイーブなAddNJ（手法1, nRF≈0.65）の存在によって低エラー領域（nRF 0〜0.15）のAddNJ2、FastME、BioNJ、Standard NJ間の精細な差が潰れて視認困難であった。
+- **[解決策]**:
+  1. 棒グラフを廃止し、論文仕様の散布図＋エラーバープロット（`ax.errorbar`, `linestyle="none"`, `capsize=3.5`, `markeredgecolor="black"`）に変更。
+  2. 水平オフセット（Dodge）を導入し、同一発散度におけるマーカーとエラーバーの重なりを解消。
+  3. 左パネル (a) Full Scale（$0 \le \text{nRF} \le 0.85$）で全14手法の全体像（手法1の破綻と手法1改善AddNJ2の劇的改善）を示し、右パネル (b) Zoomed Scale（$0 \le \text{nRF} \le 0.165$）で競合手法間の差（D=2.0におけるBioNJの劣化 vs AddNJ2の耐性）を高解像度に可視化。
+- **[パラメータ]**: $N=20$, $D \in \{0.5, 1.0, 2.0\}$, $L=500$ aa, 14手法, 10 replicates, Mean ± SEM.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの生成図（`results/nrf_comparison.png`）の提示
+2. 必要に応じた図の微調整（マーカーサイズ、配色、凡例配置など）
+
+---
+
+最終更新: 2026-11-11 08:15
+
+## 📈 進捗状況
+- [x] 完了: INDELible v1.03を用いたZipfian Indelシミュレーション（`POW 1.7 50`、indel_rate = 0.05, 0.1）の実装と自動ビルドスクリプト整備 (完了日: 11/11)
+- [x] 完了: 系統樹距離・ブランチ長評価指標（KF距離 `kf_bsd` / パトリスティックRMSE `patristic_rmse`）の計算機能追加（Add-NNI/SPRの非負OLSブランチ長最適化含む） (完了日: 11/11)
+- [x] 完了: スパコン向けLSFジョブアレイ投入スクリプト（`scripts/submit_lsf_indel.sh` / 240ジョブ並列）の作成 (完了日: 11/11)
+- [x] 完了: 可視化スクリプト `analysis/merge_and_plot_hpc.py` の更新（エラバープロット `nrf_vs_taxa.png`、SSS横軸プロットのSSS=0.03/0.06破線除去、AddNJ2ラベル統一、FastME-NNIを含む全手法対応） (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**:
+  1. 従来の置換のみシミュレーションでは配列長が500aa固定となり、高発散（D=2.0）でもMAFFTがほぼ完全なアライメントを復元するため、MSA_MLのnRFが全SSS域で0付近に張り付いていた。
+  2. Add-NNI / Add-SPRはカルテット加法性ペナルティの最小化のみでトポロジーを変更するため、得られた系統樹の枝長が未最適化となり、KF距離（BSD）やパトリスティックRMSEの評価で不利になる。
+- **[解決策]**:
+  1. INDELible v1.03を導入し、先行研究（PhyloTree_Methods_Comparison）と同一のZipfianモデル（`POW 1.7 50`）によるIndel挿入（indel_rate=0.05, 0.1）を実装。
+  2. `src/topology_search.py` に `fit_ols_branch_lengths`（二乗残差最小化＋非負射影）を追加し、NNI/SPR後の木に対して観測距離行列 $D_{\text{obs}}$ に適合したブランチ長を付与。
+  3. `src/evaluation.py` に二部グラフスプリット接続行列を用いた高速ベクトル化パトリスティック距離行列計算 $D_{\text{pat}} = (M \odot b)^T(1-M) + (1-M)^T(M \odot b)$ を実装（$N=128$ でも $<11$ ms）。
+  4. `analysis/merge_and_plot_hpc.py` を改修し、`results_large_scale/nrf_vs_taxa.png` 準拠の切断マーカー付きエラバープロット（Dごとの独立y軸・横ドッジ）と、SSS横軸プロット（SSS=0.03/0.06破線除去、`AddNJ2` 表記）を生成。
+- **[パラメータ]**: $N \in \{20, 32, 64, 128\}$, $D \in \{0.5, 1.0, 2.0\}$, $\text{indel\_rate} \in \{0.05, 0.1\}$, WAG+$\Gamma$ ($\alpha=1.0$), `replicates=10`（計240ジョブ）。
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン上で `bsub < scripts/submit_lsf_indel.sh` を実行して全240ジョブを並列投入
+2. ジョブ完了後、`python analysis/merge_and_plot_hpc.py --outdir results_hpc_indel_0.05` および `--outdir results_hpc_indel_0.1` で集計・グラフ出力
+
+---
+
 最終更新: 2026-11-11 06:56
 
 ## 📈 進捗状況

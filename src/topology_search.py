@@ -40,6 +40,7 @@ class TreeScorer:
         eps: float = 1e-7,
         max_quartets: Optional[int] = 100000,
     ) -> None:
+        self.D_obs: np.ndarray = D_obs
         self.taxa_names: List[str] = taxa_names
         self.n: int = len(taxa_names)
         self.eps: float = eps
@@ -391,6 +392,70 @@ def get_spr_neighbors(tree: Tree) -> List[Tree]:
     return neighbors
 
 
+def fit_ols_branch_lengths(
+    tree: Tree,
+    D_obs: np.ndarray,
+    taxa_names: List[str],
+) -> None:
+    """
+    Fits Ordinary Least Squares (OLS) branch lengths (clamped to >= 0.0) on a fixed
+    Biopython Tree topology against the observed distance matrix D_obs.
+
+    Parameters
+    ----------
+    tree : Tree
+        Biopython Tree object whose clade branch lengths are updated in-place.
+    D_obs : np.ndarray
+        Observed pairwise distance matrix of shape (n, n) in substitutions/site.
+    taxa_names : List[str]
+        Ordered list of taxon names corresponding to D_obs rows/columns (unitless).
+    """
+    n = len(taxa_names)
+    if n < 3:
+        return
+
+    name_to_idx = {name: i for i, name in enumerate(taxa_names)}
+    triu_i, triu_j = np.triu_indices(n, k=1)
+    d_vec = D_obs[triu_i, triu_j]
+
+    edges: List[Tuple[Tuple[bool, ...], np.ndarray]] = []
+    seen_splits: Dict[Tuple[bool, ...], List[Clade]] = {}
+
+    tree.root.branch_length = 0.0
+    for c in tree.find_clades():
+        if c == tree.root:
+            continue
+        mask = np.zeros(n, dtype=bool)
+        for t in c.get_terminals():
+            if t.name in name_to_idx:
+                mask[name_to_idx[t.name]] = True
+        n_in = int(np.sum(mask))
+        if n_in == 0 or n_in == n:
+            c.branch_length = 0.0
+            continue
+        canon = tuple(~mask) if mask[0] else tuple(mask)
+        if canon in seen_splits:
+            seen_splits[canon].append(c)
+        else:
+            seen_splits[canon] = [c]
+            edges.append((canon, mask))
+
+    if not edges:
+        return
+
+    A = np.zeros((len(triu_i), len(edges)), dtype=np.float64)
+    for e_idx, (_, mask) in enumerate(edges):
+        A[:, e_idx] = (mask[triu_i] ^ mask[triu_j]).astype(np.float64)
+
+    b_ols, _, _, _ = np.linalg.lstsq(A, d_vec, rcond=None)
+    b_ols = np.maximum(0.0, b_ols)
+
+    for (canon, _), val in zip(edges, b_ols):
+        clades = seen_splits[canon]
+        for cl in clades:
+            cl.branch_length = float(val) / len(clades)
+
+
 def tree_to_newick(tree: Tree) -> str:
     """Converts a Biopython Tree to a Newick string."""
     stream = io.StringIO()
@@ -435,6 +500,7 @@ def hill_climb_search(
 
     current_tree = tree
     best_score = scorer.score_tree(current_tree)
+    topology_changed = False
 
     def _step(current_t: Tree, current_s: float, search_type: str) -> Tuple[Tree, float, bool]:
         get_nb = get_nni_neighbors if search_type == "nni" else get_spr_neighbors
@@ -463,8 +529,12 @@ def hill_climb_search(
                 break
             current_tree = next_tree
             best_score = next_score
+            topology_changed = True
             if verbose:
                 print(f"[{phase.upper()} iter {it+1}] Improved penalty: {best_score:.6f}")
+
+    if topology_changed:
+        fit_ols_branch_lengths(current_tree, scorer.D_obs, scorer.taxa_names)
 
     return tree_to_newick(current_tree), best_score
 

@@ -3,6 +3,7 @@ Unit tests for WAG+Gamma pairwise Maximum Likelihood distance estimation
 and multi-matrix tree quartet additivity violation scoring.
 """
 
+import math
 import numpy as np
 from src.tree_simulator import generate_backward_yule_tree, compute_patristic_distance_matrix
 from src.sequence_simulator import (
@@ -14,6 +15,8 @@ from src.sequence_simulator import (
 )
 
 from src.topology_search import TreeScorer
+from src.evaluation import evaluate_tree_rf
+from src.add_nj import add_nj2
 
 
 def test_wag_gamma_distance_identical_sequences() -> None:
@@ -79,4 +82,85 @@ def test_wag_gamma_distance_accuracy_and_both_matrices() -> None:
     assert "sss_mean" in sss_stats
     assert 0.0 <= sss_stats["sss_mean"] <= 1.0
     assert 0.0 <= sss_stats["seq_identity_mean"] <= 1.0
+
+
+def test_indelible_zipfian_indel_and_kf_patristic_rmse() -> None:
+    """
+    Verifies that INDELible Zipfian indel simulation (POW 1.7 50) works for
+    indel_rate in {0.05, 0.1}, and that evaluate_tree_rf computes kf_bsd and patristic_rmse.
+    """
+    tree, taxa_names = generate_backward_yule_tree(n_taxa=8, divergence=1.0, seed=77)
+    true_nwk = tree.to_newick() + ";"
+    D_true = compute_patristic_distance_matrix(tree, taxa_names)
+
+    # Exact recovery on D_true must yield kf_bsd ~ 0 and patristic_rmse ~ 0
+    est_true_nwk = add_nj2(D_true, taxa_names)
+    res_true = evaluate_tree_rf(est_true_nwk, true_nwk, taxa_names, D_true=D_true)
+    assert res_true["nrf"] == 0.0
+    assert res_true["kf_bsd"] < 1e-4
+    assert res_true["patristic_rmse"] < 1e-4
+
+    # Simulate with Zipfian Indel (indel_rate = 0.05 and 0.10)
+    for irate in [0.05, 0.10]:
+        seqs_indel = simulate_wag_gamma_sequences(
+            root=tree,
+            seq_length=300,
+            alpha=1.0,
+            seed=101,
+            indel_rate=irate,
+        )
+        assert len(seqs_indel) == 8
+        lengths = [len(s) for s in seqs_indel.values()]
+        assert all(l > 0 for l in lengths)
+        # Because of insertions and deletions, sequence lengths vary across taxa
+        assert len(set(lengths)) > 1
+
+
+def test_exp18_sss_distance_matrices() -> None:
+    """
+    Verifies Exp 18 SSS-derived distance matrix calculation:
+    1. similarity_to_distance_matrix transforms w_ij to linear (1 - w) and log (-ln(w)).
+    2. compute_all_pairwise_matrices_and_sss with return_sss_matrices=True returns 5 items.
+    """
+    from src.sequence_simulator import (
+        similarity_to_distance_matrix,
+        compute_all_pairwise_matrices_and_sss,
+    )
+
+    # 1. Test mathematical transformations of w_ij
+    w_test = np.array([
+        [1.0, 0.8, 0.0],
+        [0.8, 1.0, 0.25],
+        [0.0, 0.25, 1.0],
+    ], dtype=np.float64)
+
+    d_lin = similarity_to_distance_matrix(w_test, dist_model="linear")
+    assert np.allclose(np.diag(d_lin), 0.0)
+    assert np.allclose(d_lin, d_lin.T)
+    assert np.isclose(d_lin[0, 1], 0.2)
+    assert np.isclose(d_lin[0, 2], 1.0)
+
+    d_log = similarity_to_distance_matrix(w_test, dist_model="log", epsilon=1e-4)
+    assert np.allclose(np.diag(d_log), 0.0)
+    assert np.allclose(d_log, d_log.T)
+    assert np.isclose(d_log[0, 1], -math.log(0.8))
+    assert np.isclose(d_log[0, 2], -math.log(1e-4))
+
+    # 2. Test return_sss_matrices=True in compute_all_pairwise_matrices_and_sss
+    tree, taxa_names = generate_backward_yule_tree(n_taxa=5, divergence=0.5, seed=123)
+    seqs = simulate_wag_gamma_sequences(tree, seq_length=200, seed=123)
+
+    D_b, D_w, sss_stats, D_sss_lin, D_sss_log = compute_all_pairwise_matrices_and_sss(
+        seqs, taxa_names, return_sss_matrices=True
+    )
+    assert D_sss_lin.shape == (5, 5)
+    assert D_sss_log.shape == (5, 5)
+    assert np.allclose(np.diag(D_sss_lin), 0.0)
+    assert np.allclose(np.diag(D_sss_log), 0.0)
+    assert np.allclose(D_sss_lin, D_sss_lin.T)
+    assert np.allclose(D_sss_log, D_sss_log.T)
+    assert np.all(D_sss_lin >= 0.0)
+    assert np.all(D_sss_log >= 0.0)
+
+
 

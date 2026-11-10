@@ -333,6 +333,8 @@ def run_single_lba_trial(
 
         record["MSA_ML_nrf"] = float(ml_eval["nrf"])
         record["MSA_ML_rf"] = float(ml_eval["rf"])
+        record["MSA_ML_kf_bsd"] = float(ml_eval["kf_bsd"])
+        record["MSA_ML_patristic_rmse"] = float(ml_eval["patristic_rmse"])
         record["MSA_ML_ds_est"] = float(ml_eval["ds_est"])
         record["MSA_ML_delta_ds"] = float(ml_eval["delta_ds"])
         record["MSA_ML_is_sister"] = float(ml_eval["is_sister"])
@@ -396,6 +398,8 @@ def run_single_lba_trial(
             col_prefix = f"{m_type}_{m_name}"
             record[f"{col_prefix}_nrf"] = float(eval_res["nrf"])
             record[f"{col_prefix}_rf"] = float(eval_res["rf"])
+            record[f"{col_prefix}_kf_bsd"] = float(eval_res["kf_bsd"])
+            record[f"{col_prefix}_patristic_rmse"] = float(eval_res["patristic_rmse"])
             record[f"{col_prefix}_ds_est"] = float(eval_res["ds_est"])
             record[f"{col_prefix}_delta_ds"] = float(eval_res["delta_ds"])
             record[f"{col_prefix}_is_sister"] = float(eval_res["is_sister"])

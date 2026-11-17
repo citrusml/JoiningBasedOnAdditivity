@@ -1,3 +1,207 @@
+最終更新: 2026-11-18 05:49
+
+## 📈 進捗状況
+- [x] 完了: LSF スパコン用ジョブ配列スクリプト `scripts/submit_lsf_bioperl_nelsi.sh`（420並列ジョブ）の作成と構文チェック (完了日: 11/18)
+- [x] 完了: `benchmark_bioperl_nelsi.py` の衝突回避シャード保存（`shards/`）および `--merge-only` 統合機能の実装・動作確認 (完了日: 11/18)
+- [x] 完了: `src/generate_tree_nelsi.R` のリポジトリ内配置による HPC スタンドアロン実行対応 (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: LSF スパコン上で 42 条件（2モデル × 3タクソン × 7発散度）× 50反復を並列実行する際、各ジョブが同一ファイル名で CSV を上書きせず、終了後に全シャードを安全に統合できる仕組みが必要であった。また、スパコンへ本リポジトリのみ転送した場合でも `generate_tree_nelsi.R` を参照できるよう自己完結化する必要があった。
+- **[解決策]**:
+  1. `scripts/submit_lsf_bioperl_nelsi.sh` を作成（`#BSUB -J bioperl_nelsi[1-420]`, `#BSUB -n 1`, `#BSUB -M 4000`, `#BSUB -W 04:00`、`micromamba activate phylomethod_env`、`bash scripts/install_indelible.sh`）。1条件あたり10シャード（各5反復）に分割して 420 並列ジョブで投入。
+  2. `benchmark_bioperl_nelsi.py` に `<outdir>/shards/shard_<model>_N<taxa>_D<div >_s<idx>.csv` 形式の衝突回避保存と `--merge-only` 統合モードを追加し、2シャードの分割実行→統合テスト（28行）の正常完了を確認。
+  3. `src/generate_tree_nelsi.R` を `src/` 配下にコピーし、`PhyloTree_Methods_Comparison` 非依存で動作するよう対応。
+- **[パラメータ]**: 420 LSF array jobs (`2 models x 3 taxa x 7 D x 10 shards`), 5 reps/job, `OMP_NUM_THREADS=1`, `-M 4000`, `-W 04:00`.
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン上で `mkdir -p logs && bsub < scripts/submit_lsf_bioperl_nelsi.sh` を実行
+2. 全420ジョブ完了後、`python benchmark_bioperl_nelsi.py --merge-only --outdir results_bioperl_nelsi` で最終 CSV と条件別サマリを生成
+
+---
+
+最終更新: 2026-11-18 05:45
+
+## 📈 進捗状況
+- [x] 完了: NELSI自己相関木生成関数 `generate_nelsi_tree`（`src/tree_simulator.py`）、根-葉距離統計 `compute_root_to_tip_metrics`（`src/evaluation.py`）、Graph Splitting ラッパー `src/gs_wrapper.py` の実装 (完了日: 11/18)
+- [x] 完了: BioPerl vs. NELSI 大規模比較ベンチマークスクリプト `benchmark_bioperl_nelsi.py` の作成と1反復スモークテスト完走確認 (完了日: 11/18)
+- [x] 完了: `tests/test_lba_evaluation.py` テスト追加および `pytest -v` 全21テストパス確認 (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: $D \in \{0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0\}$、$L=500$、$\text{indel}=0.1$、$N \in \{20, 32, 64\}$、50反復において BioPerl と NELSI を比較し、`MSA_ML`, `SSS_Linear_NJ`, `SSS_Log_NJ`, `Poisson_NJ`, `MSA_NJ`, `GS`（3種）, および `sss_linear` 専用7手法を一括評価できるベンチマークスクリプトが必要であった。
+- **[解決策]**:
+  1. `src/tree_simulator.py` に `generate_tree_nelsi.R` を呼び出す `generate_nelsi_tree` を追加。
+  2. `src/evaluation.py` に `compute_root_to_tip_metrics`（平均・分散・min・max・max/min比）を追加。無向推定木には midpoint rooting を適用して一貫した根-葉距離を算出。
+  3. `src/gs_wrapper.py` を新設し、`gs2 -s -l -d` により `Poisson`, `SSS Linear`, `SSS Log` の距離行列から Graph Splitting 木を再構築（`patristic_rmse` 等のため OLS 枝長を付与）。
+  4. `benchmark_bioperl_nelsi.py` に並列実行（`--threads`）および HPC シャーディング（`--shard-idx`, `--num-shards`）を実装。
+- **[パラメータ]**: $D \in \{0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0\}$, $L=500\text{ aa}$, $\text{indel}=0.1$, $N \in \{20, 32, 64\}$, $\text{rep}=50$, BioPerl + NELSI (`nelsi_kishino`, `v=0.3`).
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーによる `benchmark_bioperl_nelsi.py` の本番実行（ローカル並列または HPC シャード実行）
+2. 出力された `results_bioperl_nelsi/benchmark_results.csv` および `summary_by_condition.csv` の可視化・解析
+
+---
+
+最終更新: 2026-11-18 05:36
+
+## 📈 進捗状況
+- [x] 完了: LBA特化評価指標群（`pair_nrf`, `pair_split_recall`, `lba_quartet_attraction`, `nta`, `compute_matrix_lba_margin`, `find_max_distance_pair`）の `src/evaluation.py` への実装 (完了日: 11/18)
+- [x] 完了: `Method.md` 第5.3節への新規LBA評価指標の数理定義追記 (完了日: 11/18)
+- [x] 完了: `tests/test_lba_evaluation.py` への単体テスト追加および `pytest -v` 全20テストパス確認 (完了日: 11/18)
+- [ ] 待機中: 実装したLBA評価指標を用いたベンチマーク・評価ステップの実行（ユーザー指示により保留）
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 従来のLBA評価は `ds_est == 2`（偽姉妹群率）や木全体の `nRF` に頼っていたが、部分的な接近の定量化や、無関係な短枝の局所的ズレ（RFスプリット不一致）を切り離した純粋なLBA吸引度評価が必要であった。
+- **[解決策]**:
+  1. `compute_tree_patristic_matrix` に `unit_lengths=True` オプションを追加し、無向木上のトポロジー的枝数距離行列をベクトル演算で厳密算出できるようにした。
+  2. `compute_pair_separating_rf` により最大距離ペア $(u, v)$ を分離する内部スプリットのみを対象とした `pair_nrf` / `pair_split_recall` / `pair_split_fnr` を実装。
+  3. `compute_lba_quartet_attraction` により、他枝の局所ノイズに完全に不変なカルテット吸引率 `lba_quartet_attraction` および誤差率 `lba_quartet_error` を実装。
+  4. `nta`（正規化トポロジー接近度）、`find_max_distance_pair`（最大パトリスティック距離ペア自動抽出）、`compute_matrix_lba_margin`（距離行列段階でのLBAマージン）を追加し、`evaluate_tree_lba` に統合した。
+- **[パラメータ]**: `auto_max_pair=False`（`lba_pair` 未指定時に `True` で最大距離ペアを自動取得）, `eps=1e-7`.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーからの指示があり次第、`benchmark_lba.py` や保存済みLBA系統樹群に対し新指標を用いた評価ステップを実行する
+
+---
+
+最終更新: 2026-11-18 04:36
+
+## 📈 進捗状況
+- [x] 完了: 系統樹距離・行列距離残差に基づく結合法 `AddNJ3`（`src/add_nj.py`）およびトポロジー探索手法 `Add-NNI2 / Add-SPR2 / Add-Hybrid2`（`src/topology_search.py` 内 `TreeDistanceScorer`）の設計・実装 (完了日: 11/18)
+- [x] 完了: `Method.md` への数理モデル・アルゴリズム・ファイル役割の体系的追記 (完了日: 11/18)
+- [x] 完了: 単体テスト追加（`tests/test_add_nj.py`, `tests/test_topology_search.py`）と全18テストパス確認 (`pytest -v`) (完了日: 11/18)
+- [x] 完了: `main.py` への全20手法ベンチマーク統合および再実行（$N=20, L=500\text{ aa}, D \in \{0.5, 1.0, 2.0\}, 10\text{ reps}$）、`RawResults.md`・グラフ出力更新 (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 従来の4点条件違反度（カルテット順位整合性）のみを用いた探索（`TreeScorer`）や貪欲結合（`AddNJ`, `AddNJ2`）に加え、「系統樹上のパトリスティック距離 $D_T$ と観測距離行列 $D_{\text{obs}}$ の直接の差（残差 $\mathcal{E}_{\text{dist}}(T; D_{\text{obs}})$）」を目的関数とする結合法（`AddNJ3`）および局所・広域探索法（`Add-NNI2 / Add-SPR2 / Add-Hybrid2`）を確立する必要があった。
+- **[解決策]**:
+  1. **AddNJ3 (`src/add_nj.py`)**: 候補ペア（NJの $Q$ 値上位 `top_k=4`）を仮結合した状態から `lookahead_depth=1` の先読み＋高速NJロールアウトで完全木の二分割集合を生成し、正則化付き正規方程式 $(A_T^\top A_T + 10^{-12}I)\mathbf{b} = A_T^\top \mathbf{d}_{\text{obs}}$ と非負クランプ $\hat{\mathbf{b}} = \max(\mathbf{0}, \mathbf{b})$ による距離残差 RMSE を最小化するペアを選択する方式を実装。
+  2. **TreeDistanceScorer (`src/topology_search.py`)**: `ols_rmse`（OLS枝長によるRMSE）、`ols_mae`、`wls_fm`（Fitch-Margoliash重み付き相対二乗誤差）、`wls_mre` をサポートし、`fit_ols_branch_lengths` とスプリット接続行列構築ヘルパー `_build_split_incidence_matrix` を共通化（コード重複排除・postorderメモ化）。`hill_climb_search` を拡張し、`TreeDistanceScorer` 利用時の改善判定閾値 `tol=1e-9` を設定。
+  3. **[ベンチマーク実験の主要結果 ($N=20, L=500\text{ aa}, 10\text{ reps}$)]**:
+     - $D = 1.0$: `Standard NJ` / `AddNJ2` ($\text{nRF} = 0.0118 \pm 0.0078$) および `NJ + Add-Hybrid` ($\text{nRF} = 0.0176 \pm 0.0090$) に対し、**`AddNJ3` と `Add-NNI2 / SPR2 / Hybrid2` 群はすべて $\text{nRF} = 0.0059 \pm 0.0059$** と誤差を半減。
+     - $D = 2.0$: `Standard NJ` ($0.0882$), `BioNJ` ($0.1235$), `FastME-SPR` ($0.0882$), 4点ペナルティ版 `NJ + Add-Hybrid` ($0.0824$) に対し、`NJ + Add-NNI2 / SPR2 / Hybrid2` および `AddNJ3 + Add-Hybrid2` が $0.0765 \pm 0.0197$、**`BioNJ + Add-Hybrid2` が全20手法中最小の $\text{nRF} = 0.0706 \pm 0.0192$** を達成。
+- **[パラメータ]**: `top_k=4`, `lookahead_depth=1`, `tie_tolerance=1e-12`, `reg=1e-12`, `mode='ols_rmse'`, `tol=1e-9` (`TreeDistanceScorer`), $N=20, L=500, D \in \{0.5, 1.0, 2.0\}$, 10 reps.
+
+## 🚀 次に行うこと (Next Actions)
+1. 必要に応じ `benchmark_hpc.py` への `AddNJ3` / `Add-Hybrid2` の組み込みと大規模データセット（$N \in \{20, 32, 64, 128\}$, インデルあり）での性能評価
+2. `benchmark_lba.py` における長枝牽引（LBA）耐性の検証（`AddNJ3` vs `AddNJ2` vs `BioNJ+Add-Hybrid2`）
+
+---
+
+最終更新: 2026-11-13 05:25
+
+## 📈 進捗状況
+- [x] 完了: 系統樹シミュレーション手法の学部生向け解説書および先行研究（syz049.pdf）比較ドキュメント `Tree_Simulation.md` の作成 (完了日: 11/13)
+- [x] 完了: BioPerl `Bio::Tree::RandomFactory` (Backward Yule) および Python フォールバックの数理的背景（切断指数分布の逆関数法等）の完全な解析・文書化 (完了日: 11/13)
+- [x] 完了: Kingman合祖過程に基づく枝長定義および「分岐数と根からの距離の相関（非ウルトラメトリック性）」と生物進化学的妥当性の解説を `Tree_Simulation.md` に追記 (完了日: 11/13)
+- [x] 完了: NELSIの自己相関型モデル（Autocorrelated Relaxed Clock / ABR）との数理的・生物学的比較解説を `Tree_Simulation.md` に追記 (完了日: 11/13)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 現在のシミュレーション手法（BioPerl / syz049 モデル）と、進化速度シミュレータとして著名な NELSI（Ho et al. 2015）の「自己相関型モデル（Autocorrelated Branch Rates, ABR）」との数理構造の違い、生物学的リアリティの差、および両者の研究目的の違いについての体系的比較が求められていた。
+- **[解決策]**:
+  1. NELSI が採用する Thorne et al. (1998) 準拠の対数正規自己相関モデル（幾何ブラウン運動：$\ln(r_{\text{child}}) \sim \mathcal{N}(\ln(r_{\text{parent}}), \nu \Delta t)$）の数理を解説。
+  2. 根本的な4つの相違点を整理：
+     - ① パラメータ構造: 「置換数直接サンプリング」 vs 「実時間 $\Delta t$ × 速度 $r$ の明示的分離」。
+     - ② 枝間相関: 「完全無相関（独立）」 vs 「クレード単位での連続的な速度遺伝」。
+     - ③ 根からの距離: 「分岐エッジ数の累積」 vs 「クレードの速度履歴（全現生種で経過年数は同一）」。
+     - ④ 研究目的: 「深層系統樹トポロジー推定ベンチマーク」 vs 「分子年代推定・分子時計モデルの統計的検出」。
+  3. なぜ本研究や syz049 で NELSI 型ではなく本モデルが選ばれるのか（スーパーファミリーにおける突発的・独立な変異加速の再現、トポロジー復元アルゴリズムのストレステスト、超高速・大量生成のポータビリティ）を論理的に明文化。
+- **[パラメータ]**: $l = 1 - \ln(u(e-1)+1)$, $l_{\text{scaled}} = l \times D$, $\text{min\_length} = 10^{-6}$, $u \sim U(0,1)$, $D \in \{0.5, 1.0, 2.0\}$.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの NELSI 自己相関型モデルとの比較解説の提示
+2. 学部生向けレクチャーや研究報告資料としての活用
+
+---
+
+最終更新: 2026-11-11 10:28
+
+## 📈 進捗状況
+- [x] 完了: `results_hpc_indel0.05` および `results_hpc_indel0.1` における Standard NJ の距離行列作成法別 nRF エラーバープロットの生成 (完了日: 11/11)
+- [x] 完了: インデル率（0.05 vs 0.10）横断比較 2行×3列マルチパネルプロット（`standard_nj_distance_matrix_cross_indel.png`）の実装・生成 (完了日: 11/11)
+- [x] 完了: `analysis/merge_and_plot_hpc.py` への Standard NJ 専用プロット生成パイプライン追加 (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: Standard NJ（近隣結合法）が用いる入力距離行列の構築法（BLOSUM62+Poisson, WAG+Γ ML, MMseqs2 SSS linear $d=1-w$, MMseqs2 SSS log $d=-\ln(w)$, True Patristic）の違いが、配列数 $N$ および発散度 $D$、インデル率の増大に伴い系統樹トポロジー推定精度（nRF）にどのような影響を与えるかが個別に可視化されていなかった。
+- **[解決策]**:
+  1. `analysis/merge_and_plot_hpc.py` に `standard_nj_distance_matrix_comparison.png`（およびFastTree非表示版 `standard_nj_pure_matrix_comparison.png`）を生成するパイプラインを追加。
+  2. インデル率 0.05 と 0.10 を上下2行に並べ、発散度 $D \in \{0.5, 1.0, 2.0\}$ ごとに Taxa $N \in \{20, 32, 64, 128\}$ に対する Mean ± SD エラーバープロット（水平ドッジ付き）を作成する `_plot_standard_nj_cross_indel_comparison` を実装。
+  3. **[実験結果の重要な発見]**:
+     - **True Patristic Distance**: 全条件で $\text{nRF} = 0.0000 \pm 0.0000$ を達成（加法性が満たされれば NJ は完全に真の系統樹を復元する理論的裏付け）。
+     - **MMseqs2 SSS Linear ($d = 1 - w$)**: 高発散度（$D=2.0$）において、BLOSUM62（$\text{nRF} \approx 0.360$ / $0.526$）や WAG+Γ（$\text{nRF} \approx 0.375$ / $0.537$）だけでなく、MSA+ML FastTree（$\text{nRF} \approx 0.413$ / $0.557$）よりも有意に低いエラー率（$\text{nRF} \approx 0.333$ / $0.492$）を達成し、インデル多発・高発散領域におけるアライメントフリー的類似度距離の極めて高い耐性が実証された。
+     - **MMseqs2 SSS Log ($d = -\ln(w)$)**: 低発散度（$D=0.5$）において微小なスコア変動が対数変換により増幅され、$\text{nRF} \approx 0.14 \sim 0.18$ と線形距離より誤差が大きくなる傾向が確認された。
+     - **BLOSUM62 vs WAG+Γ**: インデルが存在する本シミュレーション環境では、BLOSUM62 が WAG+Γ よりも一貫してわずかに優れた（低い）nRF を示した。
+- **[パラメータ]**: $N \in \{20, 32, 64, 128\}$, $D \in \{0.5, 1.0, 2.0\}$, rep=30, INDELible Zipfian rate $\in \{0.05, 0.10\}$, Mean ± SD (capsize=3.5, elinewidth=1.2).
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの Standard NJ 距離行列比較エラーバープロットの提示
+2. 論文・考察への「高発散・インデル多発下での SSS Linear 距離の優位性」の取り込み
+
+---
+
+最終更新: 2026-11-11 10:04
+
+## 📈 進捗状況
+- [x] 完了: `results_hpc_indel0.05` および `results_hpc_indel0.1` フォルダ内の nRF vs SSS グラフの横軸対数スケール（$\log_{10}(\mathrm{SSS})$）化 (完了日: 11/11)
+- [x] 完了: 配列数 $N \in \{20, 32, 64, 128\}$ 別の層別化マルチパネルプロット（`nrf_vs_sss_by_taxa_*.png`）および $N$ 別単独プロット（`nrf_vs_sss_N*.png` / `nrf_vs_sss_curves_N*.png`）の新規実装・出力 (完了日: 11/11)
+- [x] 完了: `analysis/merge_and_plot_hpc.py` における対数空間 LOWESS 平滑化（$\log_{10}(\mathrm{SSS})$ 空間でのスプライン平滑化）と $y$ 軸クリップ上限解除（$y \le 1.0$）の実装 (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 従来の nRF vs SSS プロットでは横軸が線形スケールであり、また $N \in \{20, 32, 64, 128\}$ が混在または $N=64, 128$ の狭い SSS 領域（$0.003 \sim 0.05$）に全データが集中して密集していた。また、$y$ 軸上限が 0.52 に固定されていたため、高発散度や高インデル率での高い nRF（最大 0.88）がフレーム外にクリップされる問題があった。
+- **[解決策]**:
+  1. `analysis/merge_and_plot_hpc.py` 内の `_compute_lowess_curve` を拡張し、`is_log_x=True` による $\log_{10}(\mathrm{SSS})$ 空間での LOWESS 平滑化スプライン算出を実装（`PhyloTree_Methods_Comparison` の `plot_nrf_vs_log_sss` と同一設計）。
+  2. `_plot_nrf_vs_sss_curves` および `_plot_nrf_vs_sss_by_taxa` の横軸を `ax.set_xscale("log")` に変更し、各 $N$ の SSS 分布に応じた動的レンジ設定を導入。
+  3. 配列数 $N$ 別の専用グラフ生成関数 `_plot_nrf_vs_sss_single_taxa` を新設し、各行列タイプ（BLOSUM62, WAG+Γ, MMseqs2 SSS linear/log, True Patristic）および全手法比較について、4分割マルチパネル（`nrf_vs_sss_by_taxa_*.png`）、$N$ 別単独プロット（`nrf_vs_sss_N20_*.png` 等）、$N$ 別2パネル曲線プロット（`nrf_vs_sss_curves_N20_*.png` 等）を自動一括生成。
+  4. 縦軸上限を $1.0$ に拡張し、高誤差領域も欠損なく可視化。
+- **[パラメータ]**: $N \in \{20, 32, 64, 128\}$, $D \in \{0.5, 1.0, 1.5\}$, INDELible Zipfian rate $\in \{0.05, 0.1\}$, rep=30, LOWESS frac=0.35 in $\log_{10}(\mathrm{SSS})$.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの生成グラフ（対数スケール＆ $N$ 別分割プロット）の提示と確認
+2. 必要に応じた図の解釈・論文報告への反映
+
+---
+
+最終更新: 2026-11-11 08:55
+
+## 📈 進捗状況
+- [x] 完了: ベンチマーク同一実験の再実行（Taxa=20, L=500 aa, D∈{0.5, 1.0, 2.0}, 10 reps, 計14手法）と4点制約違反度 $\mathcal{L}(T; D_{\text{obs}})$ の算出 (完了日: 11/11)
+- [x] 完了: 4点制約違反度比較グラフ（`results/penalty_comparison.png`）の新規作成・左右2パネル可視化 (完了日: 11/11)
+- [x] 完了: `main.py` および `RawResults.md` への4点条件違反度集計テーブル出力の追加 (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 従来の `main.py` ではトポロジー誤差（nRF）と実行時間のみがグラフ化されており、本研究のコア理論である4点条件違反度（Quartet Additivity Penalty $\mathcal{L}(T; D_{\text{obs}})$）の可視化が欠落していた。
+- **[解決策]**:
+  1. 同一条件（計30試行）でベンチマークを再実行し、全14手法の系統樹加法性ペナルティ $\mathcal{L}(T; D_{\text{obs}})$ を検証。
+  2. `main.py` の `generate_plots` に Figure 3 として `results/penalty_comparison.png`（Full Scale (a) ＋ Zoomed Scale (b) の2パネル散布図＋Mean ± SEMエラーバープロット）を実装。
+  3. **[実験結果の発見]**:
+     - ナイーブな AddNJ（手法1）は消去バイアスにより $\mathcal{L}(T) \approx 0.033 \sim 0.047$ と高い4点制約違反を示す。
+     - 一方、改善版 **AddNJ2（手法1改善）** は $\mathcal{L}(T) \approx 0.000089$ (D=0.5), $0.001004$ (D=1.0), $0.005307$ (D=2.0) とStandard NJと同等水準まで劇的に違反度が抑制されている。
+     - $D=2.0$ において、BioNJ は $\mathcal{L}(T) \approx 0.006846$ と高い違反度を示すのに対し、提案する加法性探索手法（**NJ + Add-Hybrid / AddNJ2 + Add-Hybrid**）は全手法中で最小の $\mathcal{L}(T) \approx 0.005178$ を達成し、目的関数通りの加法性最小化が実証された。
+- **[パラメータ]**: $N=20$, $D \in \{0.5, 1.0, 2.0\}$, $L=500$ aa, 14手法, 10 reps, Mean ± SEM.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの4点制約違反度グラフおよび実験結果の提示
+2. 論文・レポートに向けた考察の統合
+
+---
+
+最終更新: 2026-11-11 08:40
+
+## 📈 進捗状況
+- [x] 完了: `results/nrf_comparison.png` の手法対応ラベル（凡例）のキャンバス内完全表示・左右パネル位置同期修正 (完了日: 11/11)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: `fig.legend` のアンカーがキャンバス右端外（`x=0.99`）に配置されていたため、画像保存時に右側の手法対応ラベル・凡例ボックスがフレーム外に切り落とされていた。また左右パネル間で横ドッジ位置にわずかなずれがあった。
+- **[解決策]**:
+  1. `main.py` の `fig.legend` を `bbox_to_anchor=(0.825, 0.5), loc="center left"` に再配置し、`plt.savefig` に `bbox_inches="tight"` を指定。全14手法の名称・マーカー形状・配色が右側の専用領域に確実に収まるよう修正。
+  2. 凡例タイトルに `Reconstruction Methods (Left-to-Right in cluster)` を明記し、凡例の上から下への並び順が各発散度クラスタ内の左から右へのマーカー配置順と 1:1 に完全対応するように設計。
+  3. 左パネル (a) と右パネル (b) で各手法の水平ドッジ座標を完全統一し、パネル間での手法の視線移動を直観的にした。
+- **[パラメータ]**: $N=20$, $D \in \{0.5, 1.0, 2.0\}$, $L=500$ aa, 14手法, 10 reps, Mean ± SEM.
+
+## 🚀 次に行うこと (Next Actions)
+1. ユーザーへの修正図提示と表示確認
+
+---
+
 最終更新: 2026-11-11 08:35
 
 ## 📈 進捗状況

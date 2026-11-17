@@ -282,6 +282,202 @@ class TreeScorer:
         return float(np.mean(defect))
 
 
+def _build_split_incidence_matrix(
+    tree: Tree,
+    name_to_idx: Dict[str, int],
+    triu_i: np.ndarray,
+    triu_j: np.ndarray,
+    reset_root_and_empty: bool = False,
+) -> Tuple[np.ndarray, List[Tuple[bool, ...]], Dict[Tuple[bool, ...], List[Clade]]]:
+    """
+    Constructs the split-path incidence matrix A_T for all nontrivial edges of a tree.
+
+    Parameters
+    ----------
+    tree : Tree
+        Biopython Tree object (unitless).
+    name_to_idx : Dict[str, int]
+        Mapping from terminal taxon names to row/column indices (unitless).
+    triu_i : np.ndarray
+        Upper-triangular row indices of shape (n*(n-1)//2,) (unitless).
+    triu_j : np.ndarray
+        Upper-triangular column indices of shape (n*(n-1)//2,) (unitless).
+    reset_root_and_empty : bool, default=False
+        If True, resets root and empty/full clade branch lengths to 0.0 in-place.
+
+    Returns
+    -------
+    Tuple[np.ndarray, List[Tuple[bool, ...]], Dict[Tuple[bool, ...], List[Clade]]]
+        A : np.ndarray
+            Incidence matrix of shape (n*(n-1)//2, n_unique_splits) (unitless).
+        canons : List[Tuple[bool, ...]]
+            Ordered list of canonical split keys corresponding to columns of A (unitless).
+        seen_splits : Dict[Tuple[bool, ...], List[Clade]]
+            Mapping from canonical split key to corresponding Biopython Clade objects.
+    """
+    n = len(name_to_idx)
+    canons: List[Tuple[bool, ...]] = []
+    masks: List[np.ndarray] = []
+    seen_splits: Dict[Tuple[bool, ...], List[Clade]] = {}
+
+    if reset_root_and_empty:
+        tree.root.branch_length = 0.0
+
+    # Postorder memoization avoids repeated get_terminals() traversals across internal clades
+    clade_masks: Dict[Clade, np.ndarray] = {}
+    for c in tree.find_clades(order="postorder"):
+        if c.is_terminal():
+            mask = np.zeros(n, dtype=bool)
+            if c.name in name_to_idx:
+                mask[name_to_idx[c.name]] = True
+            clade_masks[c] = mask
+        else:
+            mask = np.zeros(n, dtype=bool)
+            for ch in c.clades:
+                mask |= clade_masks[ch]
+            clade_masks[c] = mask
+
+        if c == tree.root:
+            continue
+        n_in = int(np.sum(mask))
+        if n_in == 0 or n_in == n:
+            if reset_root_and_empty:
+                c.branch_length = 0.0
+            continue
+        canon = tuple(~mask) if mask[0] else tuple(mask)
+        if canon in seen_splits:
+            seen_splits[canon].append(c)
+        else:
+            seen_splits[canon] = [c]
+            canons.append(canon)
+            masks.append(mask)
+
+    if not masks:
+        return np.zeros((len(triu_i), 0), dtype=np.float64), canons, seen_splits
+
+    A = np.column_stack([(m[triu_i] ^ m[triu_j]).astype(np.float64) for m in masks])
+    return A, canons, seen_splits
+
+
+class TreeDistanceScorer:
+    """
+    Evaluator for the discrepancy between tree-induced patristic distances D_T
+    (fitted via least squares on the candidate topology) and observed matrix
+    distances D_obs.
+
+    Supports objective modes:
+    - 'ols_rmse': Unweighted OLS fit with RMSE discrepancy [substitutions/site].
+    - 'ols_mae': Unweighted OLS fit with MAE discrepancy [substitutions/site].
+    - 'wls_fm': Fitch-Margoliash WLS (w = 1 / (d + eps)) with relative squared error [unitless].
+    - 'wls_mre': WLS fit with Mean Relative Error [unitless].
+
+    Parameters
+    ----------
+    D_obs : np.ndarray
+        Observed symmetric evolutionary distance matrix of shape (n, n) in substitutions/site.
+    taxa_names : List[str]
+        List of taxon labels corresponding to matrix rows/columns (unitless).
+    mode : str, default='ols_rmse'
+        Distance discrepancy objective mode (unitless).
+    eps : float, default=1e-7
+        Numerical epsilon to avoid division by zero (unitless).
+    reg : float, default=1e-12
+        Ridge regularization constant for solving normal equations (unitless).
+    """
+
+    SUPPORTED_MODES = ("ols_rmse", "ols_mae", "wls_fm", "wls_mre")
+
+    def __init__(
+        self,
+        D_obs: np.ndarray,
+        taxa_names: List[str],
+        mode: str = "ols_rmse",
+        eps: float = 1e-7,
+        reg: float = 1e-12,
+    ) -> None:
+        if mode not in self.SUPPORTED_MODES:
+            raise ValueError(f"Unsupported mode '{mode}'. Choose from {self.SUPPORTED_MODES}.")
+        self.D_obs: np.ndarray = D_obs
+        self.taxa_names: List[str] = taxa_names
+        self.n: int = len(taxa_names)
+        self.mode: str = mode
+        self.eps: float = eps
+        self.reg: float = reg
+        self.name_to_idx: Dict[str, int] = {name: i for i, name in enumerate(taxa_names)}
+
+        self.triu_i, self.triu_j = np.triu_indices(self.n, k=1)
+        self.d_vec: np.ndarray = D_obs[self.triu_i, self.triu_j].astype(np.float64)
+        self.weights: Optional[np.ndarray] = (
+            1.0 / (self.d_vec + self.eps) if mode.startswith("wls") else None
+        )
+
+    def score_tree(self, tree: Tree) -> float:
+        """
+        Computes the distance discrepancy between tree-induced patristic distances
+        and the observed distance matrix D_obs.
+
+        Parameters
+        ----------
+        tree : Tree
+            Biopython Tree object to evaluate (unitless).
+
+        Returns
+        -------
+        float
+            Discrepancy score (RMSE/MAE in substitutions/site or dimensionless WLS error).
+        """
+        if len(self.d_vec) == 0:
+            return 0.0
+
+        A, _, _ = _build_split_incidence_matrix(
+            tree, self.name_to_idx, self.triu_i, self.triu_j, reset_root_and_empty=False
+        )
+        if A.shape[1] == 0:
+            return float(np.sqrt(np.mean(self.d_vec ** 2)))
+
+        if self.weights is not None:
+            A_fit = A * self.weights[:, None]
+            d_fit = self.d_vec * self.weights
+        else:
+            A_fit = A
+            d_fit = self.d_vec
+
+        ata = A_fit.T @ A_fit
+        ata[np.diag_indices_from(ata)] += self.reg
+        atd = A_fit.T @ d_fit
+        try:
+            b = np.linalg.solve(ata, atd)
+        except np.linalg.LinAlgError:
+            b, _, _, _ = np.linalg.lstsq(A_fit, d_fit, rcond=None)
+
+        b = np.maximum(0.0, b)
+        d_tree = A @ b
+        diff = d_tree - self.d_vec
+
+        if self.mode == "ols_rmse":
+            return float(np.sqrt(np.mean(diff ** 2)))
+        if self.mode == "ols_mae":
+            return float(np.mean(np.abs(diff)))
+        if self.mode == "wls_fm":
+            return float(np.mean((diff / (self.d_vec + self.eps)) ** 2))
+        return float(np.mean(np.abs(diff) / (self.d_vec + self.eps)))
+
+    def score_newick(self, newick_str: str) -> float:
+        """
+        Parses a Newick string and computes its tree-vs-matrix distance discrepancy.
+
+        Parameters
+        ----------
+        newick_str : str
+            Newick string representing the phylogenetic tree (unitless).
+
+        Returns
+        -------
+        float
+            Discrepancy score (substitutions/site or unitless).
+        """
+        tree: Tree = Phylo.read(io.StringIO(newick_str), "newick")
+        return self.score_tree(tree)
 
 
 def get_nni_neighbors(tree: Tree) -> List[Tree]:
@@ -418,39 +614,16 @@ def fit_ols_branch_lengths(
     triu_i, triu_j = np.triu_indices(n, k=1)
     d_vec = D_obs[triu_i, triu_j]
 
-    edges: List[Tuple[Tuple[bool, ...], np.ndarray]] = []
-    seen_splits: Dict[Tuple[bool, ...], List[Clade]] = {}
-
-    tree.root.branch_length = 0.0
-    for c in tree.find_clades():
-        if c == tree.root:
-            continue
-        mask = np.zeros(n, dtype=bool)
-        for t in c.get_terminals():
-            if t.name in name_to_idx:
-                mask[name_to_idx[t.name]] = True
-        n_in = int(np.sum(mask))
-        if n_in == 0 or n_in == n:
-            c.branch_length = 0.0
-            continue
-        canon = tuple(~mask) if mask[0] else tuple(mask)
-        if canon in seen_splits:
-            seen_splits[canon].append(c)
-        else:
-            seen_splits[canon] = [c]
-            edges.append((canon, mask))
-
-    if not edges:
+    A, canons, seen_splits = _build_split_incidence_matrix(
+        tree, name_to_idx, triu_i, triu_j, reset_root_and_empty=True
+    )
+    if A.shape[1] == 0:
         return
-
-    A = np.zeros((len(triu_i), len(edges)), dtype=np.float64)
-    for e_idx, (_, mask) in enumerate(edges):
-        A[:, e_idx] = (mask[triu_i] ^ mask[triu_j]).astype(np.float64)
 
     b_ols, _, _, _ = np.linalg.lstsq(A, d_vec, rcond=None)
     b_ols = np.maximum(0.0, b_ols)
 
-    for (canon, _), val in zip(edges, b_ols):
+    for canon, val in zip(canons, b_ols):
         clades = seen_splits[canon]
         for cl in clades:
             cl.branch_length = float(val) / len(clades)
@@ -465,20 +638,21 @@ def tree_to_newick(tree: Tree) -> str:
 
 def hill_climb_search(
     initial_newick: str,
-    scorer: TreeScorer,
+    scorer: Union[TreeScorer, TreeDistanceScorer],
     mode: str = "hybrid",
     max_iter: int = 50,
     verbose: bool = False,
 ) -> Tuple[str, float]:
     """
-    Executes hill-climbing topology search to minimize quartet additivity penalty.
+    Executes hill-climbing topology search to minimize the scorer objective
+    (quartet additivity penalty or tree-vs-matrix distance discrepancy).
 
     Parameters
     ----------
     initial_newick : str
         Starting tree in Newick format (unitless).
-    scorer : TreeScorer
-        TreeScorer instance configured with observed distance matrix (unitless).
+    scorer : Union[TreeScorer, TreeDistanceScorer]
+        Scorer instance configured with observed distance matrix (unitless).
     mode : str, default='hybrid'
         Search strategy: 'nni', 'spr', or 'hybrid' (NNI followed by SPR) (unitless).
     max_iter : int, default=50
@@ -492,7 +666,7 @@ def hill_climb_search(
         best_newick : str
             Optimized tree in Newick format.
         best_score : float
-            Final quartet additivity penalty score in [0, 1].
+            Final objective score (penalty or distance discrepancy).
     """
     tree = Phylo.read(io.StringIO(initial_newick), "newick")
     outgroup = scorer.taxa_names[0]
@@ -501,6 +675,7 @@ def hill_climb_search(
     current_tree = tree
     best_score = scorer.score_tree(current_tree)
     topology_changed = False
+    tol = 1e-9 if isinstance(scorer, TreeDistanceScorer) else 1e-7
 
     def _step(current_t: Tree, current_s: float, search_type: str) -> Tuple[Tree, float, bool]:
         get_nb = get_nni_neighbors if search_type == "nni" else get_spr_neighbors
@@ -511,7 +686,7 @@ def hill_climb_search(
 
         for nb in neighbors:
             s = scorer.score_tree(nb)
-            if s < step_best_s - 1e-7:
+            if s < step_best_s - tol:
                 step_best_s = s
                 step_best_t = nb
                 improved = True
@@ -522,7 +697,7 @@ def hill_climb_search(
 
     for phase in phases:
         for it in range(max_iter):
-            if best_score <= 1e-7:
+            if best_score <= tol:
                 break
             next_tree, next_score, improved = _step(current_tree, best_score, phase)
             if not improved:

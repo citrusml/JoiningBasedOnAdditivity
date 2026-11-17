@@ -177,10 +177,12 @@ def _compute_lowess_curve(
     x: np.ndarray,
     y: np.ndarray,
     frac: float = 0.35,
+    is_log_x: bool = True,
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Fits a LOWESS smoother over x (SSS, unitless) and y (nRF or 1-nRF, unitless),
-    falling back to non-robust local regression (it=0) if MAD collapses when many y=0.
+    Fits a LOWESS smoother over x (SSS, unitless) and y (nRF or 1-nRF, unitless).
+    When is_log_x is True, smoothing is performed in log10(x) space to preserve
+    proper local density and curvature across multiple decades of sequence similarity.
 
     Parameters
     ----------
@@ -190,6 +192,8 @@ def _compute_lowess_curve(
         1D array of topological error nRF or accuracy 1 - nRF (unitless, in [0, 1]).
     frac : float, default=0.35
         Fraction of data used when estimating each y-value in LOWESS.
+    is_log_x : bool, default=True
+        Whether to perform LOWESS smoothing in log10(x) space.
 
     Returns
     -------
@@ -197,6 +201,8 @@ def _compute_lowess_curve(
         Sorted smoothed (x_smooth, y_smooth) arrays (unitless).
     """
     valid = np.isfinite(x) & np.isfinite(y)
+    if is_log_x:
+        valid = valid & (x > 0)
     x_v, y_v = x[valid], y[valid]
     if len(x_v) < 5:
         return np.array([]), np.array([])
@@ -204,14 +210,17 @@ def _compute_lowess_curve(
     order = np.argsort(x_v)
     x_s, y_s = x_v[order], y_v[order]
 
+    fit_x = np.log10(x_s) if is_log_x else x_s
+
     try:
         from statsmodels.nonparametric.smoothers_lowess import lowess
 
-        sm = lowess(y_s, x_s, frac=frac, it=3, return_sorted=True)
+        sm = lowess(y_s, fit_x, frac=frac, it=3, return_sorted=True)
         # If robust iterations collapse due to many zeros (MAD=0), fallback to it=0
         if np.allclose(sm[:, 1], y_s) or np.max(np.abs(np.diff(sm[:, 1]))) > 0.08:
-            sm = lowess(y_s, x_s, frac=frac, it=0, return_sorted=True)
-        return sm[:, 0], np.clip(sm[:, 1], 0.0, 1.0)
+            sm = lowess(y_s, fit_x, frac=frac, it=0, return_sorted=True)
+        res_x = 10 ** sm[:, 0] if is_log_x else sm[:, 0]
+        return res_x, np.clip(sm[:, 1], 0.0, 1.0)
     except Exception:
         s_ser = pd.Series(y_s).rolling(window=max(5, len(y_s) // 10), min_periods=1, center=True).mean()
         return x_s, np.clip(s_ser.to_numpy(), 0.0, 1.0)
@@ -223,12 +232,13 @@ def _plot_nrf_vs_sss_curves(
     subtitle: str,
     out_path: str,
     frac: float = 0.35,
+    n_taxa: Optional[int] = None,
 ) -> None:
     """
     Generates a 2-panel scatter + LOWESS smoothed curve figure matching
-    `nrf_vs_sss_curves.png` (Matsui & Iwasaki 2020 Fig. 3a replication):
-    - Left panel: Topological Error (nRF) vs Sequence Similarity Score (SSS)
-    - Right panel: Topological Accuracy (1 - nRF) vs Sequence Similarity Score (SSS)
+    `nrf_vs_sss_curves.png` (Matsui & Iwasaki 2020 Fig. 3a replication) with log-scale SSS:
+    - Left panel: Topological Error (nRF) vs Sequence Similarity Score (SSS, log scale)
+    - Right panel: Topological Accuracy (1 - nRF) vs Sequence Similarity Score (SSS, log scale)
 
     Parameters
     ----------
@@ -242,18 +252,24 @@ def _plot_nrf_vs_sss_curves(
         Output PNG file path.
     frac : float, default=0.35
         LOWESS smoothing span parameter (unitless).
+    n_taxa : Optional[int], default=None
+        If provided, filters data to this specific taxon count N.
     """
     if "sss_mean" not in df.columns or df["sss_mean"].dropna().empty:
         return
 
-    valid_specs = [spec for spec in col_specs if spec[0] in df.columns]
-    if not valid_specs:
+    sub_df = df[df["n_taxa"] == n_taxa].copy() if n_taxa is not None else df.copy()
+    valid_specs = [spec for spec in col_specs if spec[0] in sub_df.columns]
+    if not valid_specs or sub_df.empty:
         return
 
-    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(16, 7), dpi=300, sharex=True)
+    fig, (ax1, ax2) = plt.subplots(nrows=1, ncols=2, figsize=(16, 7), dpi=300)
+
+    all_pos_x = []
 
     for col_name, label, color, lstyle in valid_specs:
-        sub = df[df["sss_mean"].notna() & df[col_name].notna()].copy()
+        sub = sub_df[sub_df["sss_mean"].notna() & sub_df[col_name].notna()].copy()
+        sub = sub[sub["sss_mean"] > 0]
         if len(sub) < 5:
             continue
         sub = sub.sort_values("sss_mean")
@@ -261,44 +277,52 @@ def _plot_nrf_vs_sss_curves(
         y_err = sub[col_name].to_numpy(dtype=float)
         y_acc = 1.0 - y_err
 
-        # Semitransparent scatter points
-        ax1.scatter(x, y_err, color=color, alpha=0.12, s=14, edgecolors="none")
-        ax2.scatter(x, y_acc, color=color, alpha=0.12, s=14, edgecolors="none")
+        all_pos_x.extend(x.tolist())
 
-        # LOWESS smooth curve
-        lx_err, ly_err = _compute_lowess_curve(x, y_err, frac=frac)
-        lx_acc, ly_acc = _compute_lowess_curve(x, y_acc, frac=frac)
+        # Semitransparent scatter points
+        ax1.scatter(x, y_err, color=color, alpha=0.18, s=16, edgecolors="none")
+        ax2.scatter(x, y_acc, color=color, alpha=0.18, s=16, edgecolors="none")
+
+        # LOWESS smooth curve in log space
+        lx_err, ly_err = _compute_lowess_curve(x, y_err, frac=frac, is_log_x=True)
+        lx_acc, ly_acc = _compute_lowess_curve(x, y_acc, frac=frac, is_log_x=True)
 
         if len(lx_err) > 0:
             ax1.plot(lx_err, ly_err, color=color, linestyle=lstyle, linewidth=2.5, label=label)
         if len(lx_acc) > 0:
             ax2.plot(lx_acc, ly_acc, color=color, linestyle=lstyle, linewidth=2.5, label=label)
 
-    max_sss = float(df["sss_mean"].max())
-    xlim_upper = min(0.65, max(0.20, max_sss + 0.02))
+    if not all_pos_x:
+        plt.close()
+        return
 
+    min_x = max(1e-3, float(np.min(all_pos_x)) * 0.8)
+    max_x = min(1.05, max(0.04, float(np.max(all_pos_x)) * 1.15))
+
+    taxa_suffix = f" (Taxa N = {n_taxa})" if n_taxa is not None else ""
     panel_configs = [
         (
             ax1,
-            f"Topological Error (nRF) vs Sequence Similarity Score (SSS)\n[{subtitle}]",
+            f"Topological Error (nRF) vs Sequence Similarity Score (SSS){taxa_suffix}\n[{subtitle}]",
             "Normalized RF Distance (Lower is Better)",
             "upper right",
         ),
         (
             ax2,
-            f"Topological Accuracy (1 - nRF) vs Sequence Similarity Score (SSS)\n[Matsui & Iwasaki (2020) Fig. 3a Replication — {subtitle}]",
+            f"Topological Accuracy (1 - nRF) vs Sequence Similarity Score (SSS){taxa_suffix}\n[Matsui & Iwasaki (2020) Fig. 3a Replication — {subtitle}]",
             "Correct Topology Ratio (1 - nRF, Higher is Better)",
             "lower right",
         ),
     ]
 
     for ax, title, ylabel, leg_loc in panel_configs:
+        ax.set_xscale("log")
         ax.set_title(title, fontsize=11.5, fontweight="bold", pad=12)
-        ax.set_xlabel(r"Average Sequence Similarity Score ($\bar{w}$)", fontsize=11)
-        ax.set_ylabel(ylabel, fontsize=11)
-        ax.set_xlim(-0.01, xlim_upper)
+        ax.set_xlabel(r"Sequence Similarity Score: $\mathrm{SSS}$ ($\bar{w}$, log scale)", fontsize=11, fontweight="bold")
+        ax.set_ylabel(ylabel, fontsize=11, fontweight="bold")
+        ax.set_xlim(min_x, max_x)
         ax.set_ylim(-0.02, 1.02)
-        ax.grid(True, linestyle="--", alpha=0.5)
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
         ax.legend(fontsize=9, loc=leg_loc, framealpha=0.9)
 
     plt.tight_layout()
@@ -312,11 +336,12 @@ def _plot_nrf_vs_sss_by_taxa(
     col_specs: List[Tuple[str, str, str, str]],
     subtitle: str,
     out_path: str,
-    frac: float = 0.42,
+    frac: float = 0.35,
 ) -> None:
     """
     Generates a 4-panel figure stratified by Taxon Count N (N = 20, 32, 64, 128),
-    plotting Topological Error (nRF) vs SSS with scatter points and LOWESS curves.
+    plotting Topological Error (nRF) vs SSS on a logarithmic horizontal axis
+    with scatter points and LOWESS curves.
 
     Parameters
     ----------
@@ -328,7 +353,7 @@ def _plot_nrf_vs_sss_by_taxa(
         Subtitle describing the distance matrix type.
     out_path : str
         Output PNG file path.
-    frac : float, default=0.42
+    frac : float, default=0.35
         LOWESS smoothing span parameter (unitless).
     """
     if "sss_mean" not in df.columns or "n_taxa" not in df.columns:
@@ -339,33 +364,119 @@ def _plot_nrf_vs_sss_by_taxa(
     if not valid_specs or not taxa_list:
         return
 
-    fig, axes = plt.subplots(1, len(taxa_list), figsize=(4.6 * len(taxa_list), 5.2), dpi=300, sharey=True)
+    fig, axes = plt.subplots(1, len(taxa_list), figsize=(4.8 * len(taxa_list), 5.5), dpi=300, sharey=True)
     if len(taxa_list) == 1:
         axes = [axes]
 
     for ax, n_val in zip(axes, taxa_list):
         sub_n = df[df["n_taxa"] == n_val]
+        ax.set_xscale("log")
+        n_pos_x = []
+
         for col_name, label, color, lstyle in valid_specs:
             sub = sub_n[sub_n["sss_mean"].notna() & sub_n[col_name].notna()].copy()
+            sub = sub[sub["sss_mean"] > 0]
             if len(sub) < 5:
                 continue
             sub = sub.sort_values("sss_mean")
             x = sub["sss_mean"].to_numpy(dtype=float)
             y_err = sub[col_name].to_numpy(dtype=float)
+            n_pos_x.extend(x.tolist())
 
-            ax.scatter(x, y_err, color=color, alpha=0.16, s=14, edgecolors="none")
-            lx_err, ly_err = _compute_lowess_curve(x, y_err, frac=frac)
+            ax.scatter(x, y_err, color=color, alpha=0.18, s=16, edgecolors="none")
+            lx_err, ly_err = _compute_lowess_curve(x, y_err, frac=frac, is_log_x=True)
             if len(lx_err) > 0:
-                ax.plot(lx_err, ly_err, color=color, linestyle=lstyle, linewidth=2.2, label=label)
+                ax.plot(lx_err, ly_err, color=color, linestyle=lstyle, linewidth=2.3, label=label)
 
-        ax.set_title(f"Taxa N = {n_val}", fontsize=12, fontweight="bold", pad=10)
-        ax.set_xlabel(r"Average SSS ($\bar{w}$)", fontsize=10.5)
-        ax.set_ylim(-0.02, 0.52)
-        ax.grid(True, linestyle="--", alpha=0.5)
+        if n_pos_x:
+            min_x = max(1e-3, float(np.min(n_pos_x)) * 0.8)
+            max_x = min(1.05, max(0.02, float(np.max(n_pos_x)) * 1.15))
+            ax.set_xlim(min_x, max_x)
 
-    axes[0].set_ylabel("Normalized RF Distance (nRF, Lower is Better)", fontsize=11)
+        ax.set_title(f"Taxa N = {n_val}", fontsize=12.5, fontweight="bold", pad=10)
+        ax.set_xlabel(r"SSS ($\bar{w}$, log scale)", fontsize=11, fontweight="bold")
+        ax.set_ylim(-0.02, 1.0)
+        ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+    axes[0].set_ylabel("Normalized RF Distance (nRF, Lower is Better)", fontsize=11, fontweight="bold")
     axes[-1].legend(bbox_to_anchor=(1.02, 1.0), loc="upper left", fontsize=8.5, framealpha=0.9)
-    fig.suptitle(f"Topological Error (nRF) vs SSS Stratified by Taxa N — {subtitle}", fontsize=13.5, fontweight="bold", y=1.02)
+    fig.suptitle(f"Topological Error (nRF) vs SSS Stratified by Taxa N (Log Scale) — {subtitle}", fontsize=13.5, fontweight="bold", y=1.02)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[OK] Saved figure: {out_path}")
+
+
+def _plot_nrf_vs_sss_single_taxa(
+    df: pd.DataFrame,
+    col_specs: List[Tuple[str, str, str, str]],
+    subtitle: str,
+    n_taxa: int,
+    out_path: str,
+    frac: float = 0.35,
+) -> None:
+    """
+    Generates a dedicated single-panel figure for a specific Taxon Count N,
+    plotting Topological Error (nRF) vs SSS on a logarithmic horizontal axis
+    with scatter points and LOWESS curves for all methods.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Benchmark summary DataFrame containing `n_taxa`, `sss_mean`, and `*_nrf` columns.
+    col_specs : List[Tuple[str, str, str, str]]
+        List of (column_name, label, color, linestyle) specifications.
+    subtitle : str
+        Subtitle describing the distance matrix type.
+    n_taxa : int
+        The taxon count N to plot.
+    out_path : str
+        Output PNG file path.
+    frac : float, default=0.35
+        LOWESS smoothing span parameter.
+    """
+    if "sss_mean" not in df.columns or "n_taxa" not in df.columns:
+        return
+
+    sub_n = df[df["n_taxa"] == n_taxa].copy()
+    valid_specs = [spec for spec in col_specs if spec[0] in sub_n.columns]
+    if not valid_specs or sub_n.empty:
+        return
+
+    fig, ax = plt.subplots(figsize=(9, 6.2), dpi=300)
+    ax.set_xscale("log")
+    n_pos_x = []
+
+    for col_name, label, color, lstyle in valid_specs:
+        sub = sub_n[sub_n["sss_mean"].notna() & sub_n[col_name].notna()].copy()
+        sub = sub[sub["sss_mean"] > 0]
+        if len(sub) < 5:
+            continue
+        sub = sub.sort_values("sss_mean")
+        x = sub["sss_mean"].to_numpy(dtype=float)
+        y_err = sub[col_name].to_numpy(dtype=float)
+        n_pos_x.extend(x.tolist())
+
+        ax.scatter(x, y_err, color=color, alpha=0.20, s=18, edgecolors="none")
+        lx_err, ly_err = _compute_lowess_curve(x, y_err, frac=frac, is_log_x=True)
+        if len(lx_err) > 0:
+            ax.plot(lx_err, ly_err, color=color, linestyle=lstyle, linewidth=2.5, label=label)
+
+    if not n_pos_x:
+        plt.close()
+        return
+
+    min_x = max(1e-3, float(np.min(n_pos_x)) * 0.8)
+    max_x = min(1.05, max(0.02, float(np.max(n_pos_x)) * 1.15))
+    ax.set_xlim(min_x, max_x)
+    ax.set_ylim(-0.02, 1.0)
+    ax.grid(True, which="both", linestyle="--", alpha=0.4)
+
+    ax.set_title(f"Topological Error (nRF) vs SSS (Log Scale) [Taxa N = {n_taxa}]\n{subtitle}", fontsize=12.5, fontweight="bold", pad=12)
+    ax.set_xlabel(r"Sequence Similarity Score: $\mathrm{SSS}$ ($\bar{w}$, log scale)", fontsize=11, fontweight="bold")
+    ax.set_ylabel("Normalized RF Distance (nRF, Lower is Better)", fontsize=11, fontweight="bold")
+    ax.legend(bbox_to_anchor=(1.02, 1.0), loc="upper left", fontsize=9, framealpha=0.9)
+
     plt.tight_layout()
     plt.savefig(out_path, dpi=300, bbox_inches="tight")
     plt.close()
@@ -477,6 +588,46 @@ def generate_all_hpc_plots(df: pd.DataFrame, outdir: str = "results_hpc") -> Non
         out_path=os.path.join(outdir, "nrf_blosum62_vs_wag_gamma.png"),
     )
 
+    # 2b. Standard NJ: Impact of Distance Matrix Construction Methods on nRF
+    std_nj_matrix_specs = [
+        ("true_Standard_NJ_nrf", "Standard NJ: True Patristic Distance", "#2ca02c", "*"),
+        ("blosum62_Standard_NJ_nrf", "Standard NJ: BLOSUM62 + Poisson", "#1f77b4", "s"),
+        ("wag_gamma_Standard_NJ_nrf", "Standard NJ: WAG + Γ ML", "#ff7f0e", "^"),
+        ("sss_linear_Standard_NJ_nrf", "Standard NJ: MMseqs2 SSS Linear (d = 1 - w)", "#9467bd", "P"),
+        ("sss_log_Standard_NJ_nrf", "Standard NJ: MMseqs2 SSS Log (d = -ln(w))", "#17becf", "D"),
+        ("MSA_ML_nrf", "MSA + ML (FastTree Ref)", "#d62728", "o"),
+    ]
+    _plot_metric_by_taxa_and_divergence(
+        df=df,
+        col_specs=std_nj_matrix_specs,
+        ylabel="Normalized Robinson-Foulds Distance (nRF)",
+        suptitle="Standard NJ: Impact of Distance Matrix Construction on Topological Error (nRF ± SD)",
+        out_path=os.path.join(outdir, "standard_nj_distance_matrix_comparison.png"),
+    )
+    _plot_metric_by_taxa_and_divergence(
+        df=df,
+        col_specs=std_nj_matrix_specs,
+        ylabel="Normalized Robinson-Foulds Distance (nRF)",
+        suptitle="Standard NJ: Impact of Distance Matrix Construction on Topological Error (nRF ± SD)",
+        out_path=os.path.join(outdir, "nrf_standard_nj_by_matrix_vs_taxa.png"),
+    )
+
+    # Pure distance matrix specs without FastTree ref
+    std_nj_pure_matrix_specs = [
+        ("true_Standard_NJ_nrf", "True Patristic Distance", "#2ca02c", "*"),
+        ("blosum62_Standard_NJ_nrf", "BLOSUM62 + Poisson", "#1f77b4", "s"),
+        ("wag_gamma_Standard_NJ_nrf", "WAG + Γ ML", "#ff7f0e", "^"),
+        ("sss_linear_Standard_NJ_nrf", "MMseqs2 SSS Linear (d = 1 - w)", "#9467bd", "P"),
+        ("sss_log_Standard_NJ_nrf", "MMseqs2 SSS Log (d = -ln(w))", "#17becf", "D"),
+    ]
+    _plot_metric_by_taxa_and_divergence(
+        df=df,
+        col_specs=std_nj_pure_matrix_specs,
+        ylabel="Normalized Robinson-Foulds Distance (nRF)",
+        suptitle="Standard NJ: Distance Matrix Comparison (Pure Distance, nRF ± SD)",
+        out_path=os.path.join(outdir, "standard_nj_pure_matrix_comparison.png"),
+    )
+
     # 3. 4-Point Condition Violation (Quartet Additivity Penalty) plots
     for m_type, m_title in matrix_labels.items():
         pen_specs = [
@@ -498,7 +649,9 @@ def generate_all_hpc_plots(df: pd.DataFrame, outdir: str = "results_hpc") -> Non
             out_path=os.path.join(outdir, f"penalty_obs_{m_type}_vs_taxa.png"),
         )
 
-    # 4. nRF & Accuracy (1 - nRF) vs SSS Scatter + LOWESS Curves (Matsui & Iwasaki 2020 Fig. 3a style)
+    taxa_list = sorted(df["n_taxa"].unique()) if "n_taxa" in df.columns else []
+
+    # 4. nRF & Accuracy (1 - nRF) vs SSS Scatter + LOWESS Curves (Matsui & Iwasaki 2020 Fig. 3a style, Log-Scale)
     for m_type, m_title in matrix_labels.items():
         sss_curve_specs = [
             ("MSA_ML_nrf", "MSA + ML (FastTree)", "#d62728", "-"),
@@ -510,6 +663,7 @@ def generate_all_hpc_plots(df: pd.DataFrame, outdir: str = "results_hpc") -> Non
             (f"{m_type}_BioNJ_Add_NNI_nrf", "BioNJ + Add-NNI", "#8c564b", "--"),
             (f"{m_type}_AddNJ2_Add_NNI_nrf", "AddNJ2 + Add-NNI", "#e377c2", "-."),
         ]
+        # Overall 2-panel curves (all Taxa combined, log x-scale)
         _plot_nrf_vs_sss_curves(
             df=df,
             col_specs=sss_curve_specs,
@@ -517,13 +671,32 @@ def generate_all_hpc_plots(df: pd.DataFrame, outdir: str = "results_hpc") -> Non
             out_path=os.path.join(outdir, f"nrf_vs_sss_curves_{m_type}.png"),
             frac=0.35,
         )
+        # 4-panel subplots stratified by Taxa N (log x-scale)
         _plot_nrf_vs_sss_by_taxa(
             df=df,
             col_specs=sss_curve_specs,
             subtitle=m_title,
             out_path=os.path.join(outdir, f"nrf_vs_sss_by_taxa_{m_type}.png"),
-            frac=0.45,
+            frac=0.35,
         )
+        # Dedicated per-N single-panel and 2-panel curve plots
+        for n_val in taxa_list:
+            _plot_nrf_vs_sss_single_taxa(
+                df=df,
+                col_specs=sss_curve_specs,
+                subtitle=m_title,
+                n_taxa=n_val,
+                out_path=os.path.join(outdir, f"nrf_vs_sss_N{n_val}_{m_type}.png"),
+                frac=0.35,
+            )
+            _plot_nrf_vs_sss_curves(
+                df=df,
+                col_specs=sss_curve_specs,
+                subtitle=m_title,
+                out_path=os.path.join(outdir, f"nrf_vs_sss_curves_N{n_val}_{m_type}.png"),
+                frac=0.35,
+                n_taxa=n_val,
+            )
 
     # Main combined nrf_vs_sss_curves.png (MSA+ML vs BLOSUM62 & WAG+Gamma all methods)
     main_sss_specs = [
@@ -550,6 +723,152 @@ def generate_all_hpc_plots(df: pd.DataFrame, outdir: str = "results_hpc") -> Non
         out_path=os.path.join(outdir, "nrf_vs_sss_curves.png"),
         frac=0.35,
     )
+    for n_val in taxa_list:
+        _plot_nrf_vs_sss_curves(
+            df=df,
+            col_specs=main_sss_specs,
+            subtitle="BLOSUM62 & WAG+Γ vs MSA+ML",
+            out_path=os.path.join(outdir, f"nrf_vs_sss_curves_N{n_val}.png"),
+            frac=0.35,
+            n_taxa=n_val,
+        )
+        _plot_nrf_vs_sss_single_taxa(
+            df=df,
+            col_specs=main_sss_specs,
+            subtitle="BLOSUM62 & WAG+Γ vs MSA+ML",
+            n_taxa=n_val,
+            out_path=os.path.join(outdir, f"nrf_vs_sss_N{n_val}.png"),
+            frac=0.35,
+        )
+
+
+def _plot_standard_nj_cross_indel_comparison(
+    df_005: pd.DataFrame,
+    df_010: pd.DataFrame,
+    out_paths: List[str],
+) -> None:
+    """
+    Generates a 2-row x 3-column error bar plot comparing how distance matrix construction
+    impacts Standard NJ performance across two INDELible indel rates (0.05 and 0.10).
+    """
+    col_specs = [
+        ("true_Standard_NJ_nrf", "Standard NJ: True Patristic Distance", "#2ca02c", "*"),
+        ("blosum62_Standard_NJ_nrf", "Standard NJ: BLOSUM62 + Poisson", "#1f77b4", "s"),
+        ("wag_gamma_Standard_NJ_nrf", "Standard NJ: WAG + Γ ML", "#ff7f0e", "^"),
+        ("sss_linear_Standard_NJ_nrf", "Standard NJ: MMseqs2 SSS Linear (d = 1 - w)", "#9467bd", "P"),
+        ("sss_log_Standard_NJ_nrf", "Standard NJ: MMseqs2 SSS Log (d = -ln(w))", "#17becf", "D"),
+        ("MSA_ML_nrf", "MSA + ML (FastTree Ref)", "#d62728", "o"),
+    ]
+    divergences = [0.5, 1.0, 2.0]
+    taxa_list = [20, 32, 64, 128]
+    n_methods = len(col_specs)
+    dodge_offsets = np.linspace(-0.30, 0.30, n_methods)
+
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10.5), dpi=300, sharey=False)
+
+    row_data = [
+        ("Indel Rate = 0.05", df_005),
+        ("Indel Rate = 0.10", df_010),
+    ]
+
+    for r_idx, (indel_label, df) in enumerate(row_data):
+        for c_idx, div in enumerate(divergences):
+            ax = axes[r_idx, c_idx]
+            sub_df = df[df["divergence"] == div]
+            max_y_val = 0.02
+
+            for idx, (col_name, label, color, marker) in enumerate(col_specs):
+                x_pts, y_means, y_sds = [], [], []
+                for t_idx, n in enumerate(taxa_list):
+                    t_df = sub_df[sub_df["n_taxa"] == n]
+                    if col_name in t_df and t_df[col_name].notna().any():
+                        series = t_df[col_name].dropna()
+                        if len(series) > 0:
+                            x_pts.append(t_idx + dodge_offsets[idx])
+                            m_val = float(series.mean())
+                            s_val = float(series.std(ddof=1)) if len(series) > 1 else 0.0
+                            y_means.append(m_val)
+                            y_sds.append(s_val)
+                            if m_val + s_val > max_y_val:
+                                max_y_val = m_val + s_val
+
+                if x_pts:
+                    ax.errorbar(
+                        x_pts,
+                        y_means,
+                        yerr=y_sds,
+                        fmt=marker,
+                        color=color,
+                        label=label,
+                        markersize=7.5,
+                        capsize=3.5,
+                        capthick=1.2,
+                        elinewidth=1.2,
+                        linestyle="none",
+                        alpha=0.9,
+                        markeredgecolor="black",
+                        markeredgewidth=0.5,
+                    )
+
+            sss_str = ""
+            if "sss_mean" in sub_df.columns and sub_df["sss_mean"].notna().any():
+                sss_str = f" (Mean SSS = {sub_df['sss_mean'].mean():.3f})"
+
+            ax.set_title(f"{indel_label} | Divergence D = {div}{sss_str}", fontsize=12, fontweight="bold", pad=8)
+            ax.set_xlabel("Number of Taxa (N)", fontsize=11, fontweight="bold")
+            ax.set_xticks(range(len(taxa_list)))
+            ax.set_xticklabels([f"N = {n}" for n in taxa_list], fontsize=10, fontweight="bold")
+
+            y_margin = max_y_val * 0.14
+            ax.set_ylim(-max(0.003, y_margin * 0.25), max_y_val + y_margin)
+            if c_idx == 0:
+                ax.set_ylabel("Normalized RF Distance (nRF)", fontsize=11, fontweight="bold")
+
+            for sep in np.arange(0.5, len(taxa_list) - 0.5, 1.0):
+                ax.axvline(sep, color="gray", linestyle=":", alpha=0.35, zorder=0)
+
+            ax.grid(True, axis="y", ls="--", alpha=0.5, zorder=0)
+
+    axes[0, -1].legend(
+        bbox_to_anchor=(1.03, 1.0),
+        loc="upper left",
+        fontsize=9.5,
+        frameon=True,
+        edgecolor="gray",
+        title="Distance Matrix Construction",
+        title_fontsize=10.5,
+    )
+    fig.suptitle(
+        "Standard NJ: Impact of Distance Matrix Construction on Topological Error (nRF ± SD)\n"
+        "[INDELible Zipfian Indel Rates 0.05 vs 0.10]",
+        fontsize=14,
+        fontweight="bold",
+        y=1.01,
+    )
+    plt.tight_layout()
+    for op in out_paths:
+        os.makedirs(os.path.dirname(op), exist_ok=True)
+        plt.savefig(op, dpi=300, bbox_inches="tight")
+        print(f"[OK] Saved cross-indel figure: {op}")
+    plt.close()
+
+
+def generate_cross_indel_comparison(
+    dir_005: str = "results_hpc_indel0.05/main",
+    dir_010: str = "results_hpc_indel0.1/main",
+) -> None:
+    """Checks for both indel summary CSVs and produces the unified 2-row comparison plot."""
+    path_005 = os.path.join(dir_005, "hpc_benchmark_summary.csv")
+    path_010 = os.path.join(dir_010, "hpc_benchmark_summary.csv")
+    if os.path.exists(path_005) and os.path.exists(path_010):
+        df_005 = pd.read_csv(path_005)
+        df_010 = pd.read_csv(path_010)
+        out_paths = [
+            os.path.join(dir_005, "standard_nj_distance_matrix_cross_indel.png"),
+            os.path.join(dir_010, "standard_nj_distance_matrix_cross_indel.png"),
+            os.path.join("results", "standard_nj_distance_matrix_cross_indel.png"),
+        ]
+        _plot_standard_nj_cross_indel_comparison(df_005, df_010, out_paths)
 
 
 if __name__ == "__main__":
@@ -559,4 +878,5 @@ if __name__ == "__main__":
 
     df_merged = merge_shards(outdir=args.outdir)
     generate_all_hpc_plots(df_merged, outdir=args.outdir)
+    generate_cross_indel_comparison()
 

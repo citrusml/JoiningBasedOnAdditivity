@@ -65,6 +65,30 @@ $$
 各ステップで $\text{SisterDefect}(i, j)$ を最小化するペア $(i^*, j^*)$ を選択して結合する。
 無関係なカルテットが評価から完全に除外されるため消去バイアスが発生せず、真の姉妹群が高精度に抽出される。
 
+---
+
+## 2.3 手法1改善2: 系統樹距離・行列距離残差最小化結合法 (AddNJ3)
+
+これまでの AddNJ / AddNJ2 では4点条件の違反度を代理指標として用いていましたが、**AddNJ3** では「**推定された系統樹上のパトリスティック距離 $D_T$ と元の観測距離行列 $D_{\text{obs}}$ の差（残差）**」そのものを直接の目的関数として結合ペアを選択します。
+
+### 目的関数（Tree-Matrix Distance Discrepancy）
+$n$ タクソンの系統樹トポロジー $T$ における各枝 $e \in E(T)$（最大 $2n - 3$ 本）が誘導する二分割（スプリット）接続行列を $A_T \in \{0, 1\}^{\binom{n}{2} \times |E(T)|}$ とします。ここで、葉ペア $(i, j)$ を結ぶ木上の最短パスに枝 $e$ が含まれるとき $A_{(i,j), e} = 1$、含まれないとき $0$ です。
+観測距離行列 $D_{\text{obs}}$ の上三角ベクトルを $\mathbf{d}_{\text{obs}} \in \mathbb{R}^{\binom{n}{2}}$ としたとき、最小二乗法（OLS）および非負制約クランプにより最適枝長ベクトル $\hat{\mathbf{b}}$ を算出します：
+$$
+\mathbf{b}_{\text{OLS}} = \bigl(A_T^\top A_T + \lambda I\bigr)^{-1} A_T^\top \mathbf{d}_{\text{obs}}, \quad \hat{\mathbf{b}} = \max(\mathbf{0}, \mathbf{b}_{\text{OLS}}) \quad (\lambda = 10^{-12})
+$$
+これより誘導される系統樹上の距離ベクトル $\mathbf{d}_T = A_T \hat{\mathbf{b}}$ と観測距離ベクトル $\mathbf{d}_{\text{obs}}$ の二乗平均平方根誤差（Patristic-Matrix Distance RMSE）を目的関数とします：
+$$
+\mathcal{E}_{\text{dist}}(T; D_{\text{obs}}) = \sqrt{\frac{2}{n(n-1)} \sum_{1 \le i < j \le n} \bigl(D_T(i, j) - D_{\text{obs}}(i, j)\bigr)^2}
+$$
+$D_{\text{obs}}$ が厳密に加法的であるとき、真の系統樹 $T^*$ において $\mathcal{E}_{\text{dist}}(T^*; D_{\text{obs}}) = 0$ となります。
+
+### 先読みロールアウト結合アルゴリズム
+1. 現在のアクティブノード数を $m$（$m > 3$）とする。
+2. NJ法の $Q$ 行列基準 $Q_{ab} = (m - 2) D_{ab} - r_a - r_b$ が最小となる上位 $k$ 個（デフォルト `top_k = 4`）の候補ペア $(a, b)$ を抽出する。
+3. 各候補ペア $(a, b)$ について、仮に $(a, b)$ を結合した状態から深さ `lookahead_depth`（デフォルト 1 ステップ先読み、分岐幅 `width = top_k`）の探索と標準NJによる高速ロールアウト完遂を行い、生成される完全二分木 $T^{(a, b)}$ のスプリット集合を構築する。
+4. 各候補ペアが誘導する完全木 $T^{(a, b)}$ に対し $\mathcal{E}_{\text{dist}}(T^{(a, b)}; D_{\text{obs}})$ を評価し、最小残差を与えるペア $(a^*, b^*)$ を正式な結合対象として選択する（同値時は $Q_{ab}$ でタイブレーク）。
+5. 選択したペアを結合して距離行列を $m-1$ 次元に縮約し、$m = 3$ に到達するまで繰り返す。
 
 ---
 
@@ -96,10 +120,31 @@ $$
 
 ---
 
+## 3.2 手法2改善: 系統樹距離・行列距離残差に基づくトポロジー探索 (Add-NNI2 / Add-SPR2 / Add-Hybrid2)
+
+従来の手法2（`TreeScorer`）では、系統樹が誘導するカルテット位相と観測距離のペア和との比較による4点条件違反度 $\mathcal{L}(T)$ を目的関数として用いました。
+これに対し、**Add-NNI2 / Add-SPR2 / Add-Hybrid2**（`TreeDistanceScorer`）では、トポロジー $T$ 上の最小二乗最適枝長から誘導される**系統樹上のパトリスティック距離 $D_T$ と距離行列上の観測距離 $D_{\text{obs}}$ の差**を目的関数としてトポロジー探索を行います。
+
+### 数理モデルと従来の手法2との違い
+1. **目的関数（直接距離残差）**:
+   各近傍トポロジー $T'$ に対して、スプリット接続行列 $A_{T'}$ を構築し、非負制約付き最小二乗枝長 $\hat{\mathbf{b}} = \max(\mathbf{0}, \mathbf{b}_{\text{OLS}})$ から系統樹距離ベクトル $\mathbf{d}_{T'} = A_{T'} \hat{\mathbf{b}}$ を算出します。
+   - **OLS RMSE (`ols_rmse`, デフォルト)**:
+     $$
+     \mathcal{E}_{\text{dist}}(T'; D_{\text{obs}}) = \sqrt{\frac{2}{n(n-1)} \sum_{1 \le i < j \le n} \bigl(D_{T'}(i, j) - D_{\text{obs}}(i, j)\bigr)^2}
+     $$
+   - その他、Fitch-Margoliash 重み付き残差（`wls_fm`: $w_{ij} = 1/(D_{ij}+\varepsilon)$ による相対二乗誤差）、平均相対誤差（`wls_mre`）、平均絶対誤差（`ols_mae`）も同一のフレームワークで評価可能です。
+2. **4点条件ペナルティ探索（手法2）との違い**:
+   - 手法2（`TreeScorer`）はトポロジー間のカルテット順位整合性のみを評価し、枝長の絶対値誤差は考慮しません。
+   - 手法2改善（`TreeDistanceScorer`）は、実際に木に枝長を当てはめた際の全ペア距離の一致度 $\mathcal{E}_{\text{dist}}$ を直接最小化するため、長距離・近距離の距離バランスを含めた総合的なフィッティングが可能です。
+3. **探索アルゴリズム**:
+   `hill_climb_search` を用いて `Add-NNI2`（`mode="nni"`）、`Add-SPR2`（`mode="spr"`）、`Add-Hybrid2`（`mode="hybrid"`）を実行し、最適トポロジー確定後に `fit_ols_branch_lengths` で枝長を付与します。
+
+---
+
 ## 4. プロジェクトファイル構成と役割
 
-- `src/add_nj.py`: 手法1（AddNJ）のコアアルゴリズム実装。ベクトル化されたカルテット計算と木構築。
-- `src/topology_search.py`: 手法2（加法性NNI/SPR/Hybrid探索）の実装。DendroPyを用いた木構造操作。
+- `src/add_nj.py`: 手法1（`add_nj`, `add_nj2`）および手法1改善2（`add_nj3`：系統樹距離・行列距離残差最小化結合法）のコアアルゴリズム実装。
+- `src/topology_search.py`: 手法2（`TreeScorer` による4点条件ペナルティ探索）および手法2改善（`TreeDistanceScorer` による系統樹距離・行列距離残差に基づく `Add-NNI2`/`Add-SPR2`/`Add-Hybrid2` 探索）の実装。
 - `src/fastme_wrapper.py`: 外部ツール FastME（BioNJ, FastME-NNI, FastME-SPR）の実行ラッパー。
 - `src/sequence_simulator.py`: WAG+Gammaモデルによる配列進化シミュレータおよびBLOSUM62ポアソン距離計算。
 - `src/tree_simulator.py`: 真の系統樹生成（Backward Yule過程）とパトリスティック距離行列の計算。
@@ -142,7 +187,22 @@ $$
    $$
    \text{FalseSisterRate} = \frac{1}{R} \sum_{r=1}^R \mathbb{I}(DS_{\text{est}}^{(r)} = 2) \times 100\%
    $$
-3. **加法性基準の耐性仮説**:
+3. **正規化トポロジー接近度 ($\text{NTA}$, Normalized Topological Attraction)**:
+   $$
+   \text{NTA}(u, v) = \frac{DS_{\text{true}}(u, v) - DS_{\text{est}}(u, v)}{DS_{\text{true}}(u, v) - 2} \quad (DS_{\text{true}} > 2)
+   $$
+   完全に引き寄せられて偽姉妹群になると $1.0$、真の位置関係を維持すれば $0.0$ となります。
+4. **ペア分離スプリット限定RF ($\text{nRF}_{u, v}$, `pair_nrf` / `pair_split_recall`)**:
+   全内部スプリットのうち対象ペア $(u, v)$ を異なる側に分けるスプリット $\Sigma_{u, v}(T)$ のみに限定した正規化RF距離と再現率。
+5. **長枝ペア限定カルテット吸引率 ($\text{LBA-Q}_{\text{attract}}$, `lba_quartet_attraction`)**:
+   真の木上で $(u, v)$ が分離されているカルテット $\mathcal{Q}_{u \neq v}$ のうち、推定木で誤って $uv \mid kl$ に結合された割合：
+   $$
+   \text{LBA-Q}_{\text{attract}}(u, v) = \frac{1}{|\mathcal{Q}_{u \neq v}|} \sum_{(u,v,k,l) \in \mathcal{Q}_{u \neq v}} \mathbb{I}\bigl(\text{topology}_{T_{\text{est}}}(u,v,k,l) = uv \mid kl\bigr)
+   $$
+   無関係な短枝の局所的ズレに完全に不変であり、純粋なLBA吸引度のみを $[0, 1]$ で定量化します。
+6. **距離行列LBAマージン ($M_{\text{LBA}}(u, v; D)$, `compute_matrix_lba_margin`)**:
+   観測距離行列の段階で4点条件がLBA領域（負のマージン）に入っているかを評価する事前指標。
+7. **加法性基準の耐性仮説**:
    加法性に基づく手法（AddNJ2）は、4点条件の不等式整合度（$S_1 \le \min(S_2, S_3)$）のみで結合ペアを選択するため、長枝の絶対値増大に惑わされにくく、従来のNJやBioNJよりも高いLBA耐性を発揮します。
 
 

@@ -443,6 +443,105 @@ def generate_backward_yule_tree(
     return root, taxa_names
 
 
+def generate_nelsi_tree(
+    n_taxa: int,
+    divergence: float = 1.0,
+    seed: Optional[int] = None,
+    model: str = "nelsi_kishino",
+    v: float = 0.3,
+    initial_rate: float = 1.0,
+    scale_mode: str = "root_to_tip",
+    lba_ratio: float = 1.0,
+) -> Tuple[SimTreeNode, List[str]]:
+    """
+    Generates a synthetic phylogenetic tree with Yule topology and autocorrelated
+    branch lengths using the NELSI R package via `generate_tree_nelsi.R`.
+
+    Parameters
+    ----------
+    n_taxa : int
+        Number of terminal taxa N [unitless].
+    divergence : float, default=1.0
+        Evolutionary distance scaling factor D [substitutions/site].
+    seed : Optional[int], default=None
+        Random seed for reproducibility [unitless].
+    model : str, default="nelsi_kishino"
+        NELSI rate model ('nelsi_kishino', 'nelsi_thorne', or 'nelsi_uncor_lnorm') [unitless].
+    v : float, default=0.3
+        Autocorrelation variance parameter v [unitless].
+    initial_rate : float, default=1.0
+        Initial root substitution rate [substitutions/site/unit time].
+    scale_mode : str, default="root_to_tip"
+        Scaling mode ('root_to_tip', 'mean_branch', or 'raw') [unitless].
+    lba_ratio : float, default=1.0
+        Long-branch attraction multiplier on T1 and TN [unitless].
+
+    Returns
+    -------
+    Tuple[SimTreeNode, List[str]]
+        root : SimTreeNode
+            Root node of generated binary tree.
+        taxa_names : List[str]
+            List of leaf taxon names ['T1', 'T2', ..., 'TN'].
+    """
+    if n_taxa < 2:
+        raise ValueError(f"n_taxa must be at least 2, got {n_taxa}")
+    if divergence <= 0.0:
+        raise ValueError(f"divergence must be strictly positive, got {divergence}")
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    repo_root = os.path.abspath(os.path.join(script_dir, ".."))
+    candidates = [
+        os.path.join(script_dir, "generate_tree_nelsi.R"),
+        os.path.join(repo_root, "bin", "generate_tree_nelsi.R"),
+        os.path.abspath(os.path.join(repo_root, "..", "PhyloTree_Methods_Comparison", "bin", "generate_tree_nelsi.R")),
+    ]
+    r_script = next((p for p in candidates if os.path.isfile(p)), None)
+    if r_script is None:
+        raise FileNotFoundError(
+            "NELSI R generator script 'generate_tree_nelsi.R' not found in src/, bin/, or ../PhyloTree_Methods_Comparison/bin/."
+        )
+
+    rscript_bin = shutil.which("Rscript")
+    if rscript_bin is None:
+        raise RuntimeError("Rscript executable not found in PATH.")
+
+    fd, target_path = tempfile.mkstemp(suffix=".nwk")
+    os.close(fd)
+
+    cmd = [
+        rscript_bin,
+        r_script,
+        "--taxa", str(n_taxa),
+        "--scale", str(divergence),
+        "--model", model,
+        "--v", str(v),
+        "--initial_rate", str(initial_rate),
+        "--scale_mode", scale_mode,
+        "--lba_ratio", str(lba_ratio),
+        "--outtree", target_path,
+    ]
+    if seed is not None:
+        cmd.extend(["--seed", str(seed)])
+
+    try:
+        proc = subprocess.run(cmd, capture_output=True, text=True)
+        if proc.returncode != 0:
+            err_msg = proc.stderr.strip() or proc.stdout.strip()
+            raise RuntimeError(f"NELSI R execution failed (code {proc.returncode}):\n{err_msg}")
+        with open(target_path, "r", encoding="utf-8") as f:
+            newick_str = f.read().strip()
+        taxa_names: List[str] = [f"T{i + 1}" for i in range(n_taxa)]
+        root = parse_newick_to_tree(newick_str)
+        return root, taxa_names
+    finally:
+        if os.path.exists(target_path):
+            try:
+                os.remove(target_path)
+            except OSError:
+                pass
+
+
 def compute_patristic_distance_matrix(
     root: SimTreeNode,
     taxa_names: List[str],

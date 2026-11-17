@@ -21,9 +21,9 @@ from src.tree_simulator import generate_backward_yule_tree, compute_patristic_di
 from src.sequence_simulator import WAGModel, simulate_wag_gamma_sequences, compute_pairwise_poisson_distance_matrix
 from src.tree_inference import matrix_to_nj_newick
 from src.evaluation import evaluate_tree_rf, FourPointCore
-from src.add_nj import add_nj, add_nj2
+from src.add_nj import add_nj, add_nj2, add_nj3
 from src.fastme_wrapper import run_fastme
-from src.topology_search import TreeScorer, hill_climb_search
+from src.topology_search import TreeScorer, TreeDistanceScorer, hill_climb_search
 
 
 def run_benchmark(
@@ -104,6 +104,7 @@ def run_benchmark(
             # Initial matrix defect
             delta_add_init, _ = core.compute_additivity_defect(D_obs)
             scorer = TreeScorer(D_obs, taxa_names)
+            dist_scorer = TreeDistanceScorer(D_obs, taxa_names, mode="ols_rmse")
 
             base_info = {
                 "run_idx": run_idx,
@@ -208,6 +209,48 @@ def run_benchmark(
             t_addnj2_hyb = time.time() - t0
             method_outputs["AddNJ2_Add_Hybrid"] = (addnj2_hyb_nwk, t_addnj2_hyb, s_addnj2_hyb)
 
+            # 14. AddNJ3 (Method 1 Improved 2: Patristic-Matrix Distance Discrepancy)
+            t0 = time.time()
+            addnj3_nwk = add_nj3(D_obs, taxa_names)
+            t_addnj3 = time.time() - t0
+            s_addnj3 = scorer.score_newick(addnj3_nwk)
+            method_outputs["AddNJ3"] = (addnj3_nwk, t_addnj3, s_addnj3)
+
+            # 15. NJ + Add-NNI2 (Method 2 Improved: Distance Discrepancy)
+            t0 = time.time()
+            nj_nni2_nwk, _ = hill_climb_search(nj_nwk, dist_scorer, mode="nni")
+            t_nj_nni2 = time.time() - t0
+            s_nj_nni2 = scorer.score_newick(nj_nni2_nwk)
+            method_outputs["NJ_Add_NNI2"] = (nj_nni2_nwk, t_nj_nni2, s_nj_nni2)
+
+            # 16. NJ + Add-SPR2 (Method 2 Improved: Distance Discrepancy)
+            t0 = time.time()
+            nj_spr2_nwk, _ = hill_climb_search(nj_nwk, dist_scorer, mode="spr")
+            t_nj_spr2 = time.time() - t0
+            s_nj_spr2 = scorer.score_newick(nj_spr2_nwk)
+            method_outputs["NJ_Add_SPR2"] = (nj_spr2_nwk, t_nj_spr2, s_nj_spr2)
+
+            # 17. NJ + Add-Hybrid2 (Method 2 Improved: Distance Discrepancy)
+            t0 = time.time()
+            nj_hyb2_nwk, _ = hill_climb_search(nj_nwk, dist_scorer, mode="hybrid")
+            t_nj_hyb2 = time.time() - t0
+            s_nj_hyb2 = scorer.score_newick(nj_hyb2_nwk)
+            method_outputs["NJ_Add_Hybrid2"] = (nj_hyb2_nwk, t_nj_hyb2, s_nj_hyb2)
+
+            # 18. BioNJ + Add-Hybrid2
+            t0 = time.time()
+            bionj_hyb2_nwk, _ = hill_climb_search(bionj_nwk, dist_scorer, mode="hybrid")
+            t_bionj_hyb2 = time.time() - t0
+            s_bionj_hyb2 = scorer.score_newick(bionj_hyb2_nwk)
+            method_outputs["BioNJ_Add_Hybrid2"] = (bionj_hyb2_nwk, t_bionj_hyb2, s_bionj_hyb2)
+
+            # 19. AddNJ3 + Add-Hybrid2
+            t0 = time.time()
+            addnj3_hyb2_nwk, _ = hill_climb_search(addnj3_nwk, dist_scorer, mode="hybrid")
+            t_addnj3_hyb2 = time.time() - t0
+            s_addnj3_hyb2 = scorer.score_newick(addnj3_hyb2_nwk)
+            method_outputs["AddNJ3_Add_Hybrid2"] = (addnj3_hyb2_nwk, t_addnj3_hyb2, s_addnj3_hyb2)
+
             # Evaluate nRF for each method
             row = dict(base_info)
             for m_name, (inferred_str, runtime, penalty) in method_outputs.items():
@@ -223,10 +266,10 @@ def run_benchmark(
                 f"NJ={row['Standard_NJ_nrf']:.3f} | "
                 f"BioNJ={row['BioNJ_nrf']:.3f} | "
                 f"FastME-SPR={row['FastME_SPR_nrf']:.3f} | "
-                f"AddNJ={row['AddNJ_nrf']:.3f} | "
                 f"AddNJ2={row['AddNJ2_nrf']:.3f} | "
+                f"AddNJ3={row['AddNJ3_nrf']:.3f} | "
                 f"NJ+Add-Hyb={row['NJ_Add_Hybrid_nrf']:.3f} | "
-                f"BioNJ+Add-Hyb={row['BioNJ_Add_Hybrid_nrf']:.3f}"
+                f"NJ+Add-Hyb2={row['NJ_Add_Hybrid2_nrf']:.3f}"
             )
 
     df = pd.DataFrame(all_records)
@@ -247,14 +290,20 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "FastME_SPR",
         "AddNJ",
         "AddNJ2",
+        "AddNJ3",
         "NJ_Add_NNI",
         "NJ_Add_SPR",
         "NJ_Add_Hybrid",
+        "NJ_Add_NNI2",
+        "NJ_Add_SPR2",
+        "NJ_Add_Hybrid2",
         "BioNJ_Add_NNI",
         "BioNJ_Add_SPR",
         "BioNJ_Add_Hybrid",
+        "BioNJ_Add_Hybrid2",
         "AddNJ_Add_Hybrid",
         "AddNJ2_Add_Hybrid",
+        "AddNJ3_Add_Hybrid2",
     ]
 
     labels = [
@@ -264,27 +313,33 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         "FastME (SPR)",
         "AddNJ (Method 1)",
         "AddNJ2 (Improved M1)",
+        "AddNJ3 (Dist RMSE)",
         "NJ + Add-NNI",
         "NJ + Add-SPR",
         "NJ + Add-Hybrid",
+        "NJ + Add-NNI2",
+        "NJ + Add-SPR2",
+        "NJ + Add-Hybrid2",
         "BioNJ + Add-NNI",
         "BioNJ + Add-SPR",
         "BioNJ + Add-Hybrid",
+        "BioNJ + Add-Hybrid2",
         "AddNJ + Add-Hybrid",
         "AddNJ2 + Add-Hybrid",
+        "AddNJ3 + Add-Hybrid2",
     ]
 
     divergences = sorted(df["divergence"].unique())
 
     # 1. Figure 1: Mean nRF vs Divergence (Error Bar Plot: Full Scale & Zoomed Scale)
-    markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "p", "*", "h", "H", "d"]
+    markers = ["o", "s", "^", "D", "v", "P", "X", "<", ">", "p", "*", "h", "H", "d", "8", "o", "s", "^", "D", "v"]
     colors = plt.cm.tab20(np.linspace(0, 1, len(methods)))
 
     x = np.arange(len(divergences))
     n_methods = len(methods)
-    dodge_offsets = np.linspace(-0.35, 0.35, n_methods)
+    dodge_offsets = np.linspace(-0.38, 0.38, n_methods)
 
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16.5, 6.2), dpi=300)
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(17.0, 6.6), dpi=300)
     plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
 
     # Panel 1: Full scale including all methods
@@ -358,10 +413,10 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
         handles=lines,
         labels=labels,
         title="Reconstruction Methods\n(Left-to-Right in cluster)",
-        title_fontsize=10.5,
+        title_fontsize=10.0,
         loc="center left",
         bbox_to_anchor=(0.825, 0.5),
-        fontsize=9.5,
+        fontsize=8.5,
         frameon=True,
         framealpha=0.95,
         edgecolor="#cccccc",
@@ -375,13 +430,13 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
     print(f"[OK] Saved figure: {fig1_path}")
 
     # 2. Figure 2: Execution Time Comparison
-    plt.figure(figsize=(10, 5), dpi=300)
+    plt.figure(figsize=(10, 6.5), dpi=300)
     mean_times = [df[f"{m}_time"].mean() for m in methods]
     sem_times = [df[f"{m}_time"].sem() for m in methods]
 
     y_pos = np.arange(len(methods))
     plt.barh(y_pos, mean_times, xerr=sem_times, color="#2b5c8f", alpha=0.85, capsize=3)
-    plt.yticks(y_pos, labels, fontsize=11)
+    plt.yticks(y_pos, labels, fontsize=10)
     plt.xlabel("Mean Execution Time per Replicate (seconds)", fontsize=12, fontweight="bold")
     plt.title("Computational Efficiency Benchmark (N=20 taxa)", fontsize=13, fontweight="bold")
     plt.xscale("log")
@@ -392,6 +447,103 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
     plt.savefig(fig2_path, dpi=300)
     plt.close()
     print(f"[OK] Saved figure: {fig2_path}")
+
+    # 3. Figure 3: Four-Point Condition Defect / Tree Additivity Penalty vs Divergence
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(17.0, 6.6), dpi=300)
+    plt.style.use("seaborn-v0_8-whitegrid" if "seaborn-v0_8-whitegrid" in plt.style.available else "default")
+
+    # Panel 1: Full scale including naive AddNJ
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    lines_pen = []
+    for idx, (m, lbl) in enumerate(zip(methods, labels)):
+        means = [df[df["divergence"] == d][f"{m}_penalty"].mean() for d in divergences]
+        sems = [df[df["divergence"] == d][f"{m}_penalty"].sem() for d in divergences]
+        eb = ax1.errorbar(
+            x + dodge_offsets[idx],
+            means,
+            yerr=sems,
+            fmt=markers[idx % len(markers)],
+            color=colors[idx],
+            label=lbl,
+            markersize=8,
+            capsize=3.5,
+            capthick=1.2,
+            elinewidth=1.2,
+            markeredgecolor="black",
+            markeredgewidth=0.6,
+            linestyle="none",
+            alpha=0.95,
+        )
+        lines_pen.append(eb)
+
+    ax1.set_xlabel("Tree Divergence Scale (substitutions/site)", fontsize=12, fontweight="bold", labelpad=8)
+    ax1.set_ylabel(r"Four-Point Condition Defect $\mathcal{L}(T; D_{\mathrm{obs}})$", fontsize=12, fontweight="bold", labelpad=8)
+    ax1.set_title("(a) All Evaluated Methods (Full Scale)", fontsize=13, fontweight="bold", pad=10)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
+    ax1.set_ylim(-0.002, max(0.06, df[[f"{m}_penalty" for m in methods]].values.max() * 1.15))
+    for sep in [0.5, 1.5]:
+        ax1.axvline(sep, color="gray", linestyle=":", alpha=0.3)
+
+    # Panel 2: Zoomed-in scale for competitive methods (excluding naive AddNJ)
+    ax2.grid(True, linestyle="--", alpha=0.5)
+    for idx, (m, lbl) in enumerate(zip(methods, labels)):
+        if m == "AddNJ":
+            continue
+        means = [df[df["divergence"] == d][f"{m}_penalty"].mean() for d in divergences]
+        sems = [df[df["divergence"] == d][f"{m}_penalty"].sem() for d in divergences]
+        ax2.errorbar(
+            x + dodge_offsets[idx],
+            means,
+            yerr=sems,
+            fmt=markers[idx % len(markers)],
+            color=colors[idx],
+            label=lbl,
+            markersize=8,
+            capsize=3.5,
+            capthick=1.2,
+            elinewidth=1.2,
+            markeredgecolor="black",
+            markeredgewidth=0.6,
+            linestyle="none",
+            alpha=0.95,
+        )
+
+    comp_pen_max = max(0.009, max(df[df["divergence"] == d][[f"{m}_penalty" for m in methods if m != "AddNJ"]].values.max() for d in divergences) * 1.15)
+    ax2.set_xlabel("Tree Divergence Scale (substitutions/site)", fontsize=12, fontweight="bold", labelpad=8)
+    ax2.set_ylabel(r"Four-Point Condition Defect $\mathcal{L}(T; D_{\mathrm{obs}})$", fontsize=12, fontweight="bold", labelpad=8)
+    ax2.set_title("(b) Competitive Methods (Zoomed Scale)", fontsize=13, fontweight="bold", pad=10)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
+    ax2.set_ylim(-0.0003, comp_pen_max)
+    for sep in [0.5, 1.5]:
+        ax2.axvline(sep, color="gray", linestyle=":", alpha=0.3)
+
+    fig.legend(
+        handles=lines_pen,
+        labels=labels,
+        title="Reconstruction Methods\n(Left-to-Right in cluster)",
+        title_fontsize=10.0,
+        loc="center left",
+        bbox_to_anchor=(0.825, 0.5),
+        fontsize=8.5,
+        frameon=True,
+        framealpha=0.95,
+        edgecolor="#cccccc",
+    )
+    fig.suptitle(r"Four-Point Condition Defect $\mathcal{L}(T; D_{\mathrm{obs}})$ Across Divergence Levels (N=20, L=500 aa, 10 reps, Mean $\pm$ SEM)", fontsize=13.5, fontweight="bold", y=0.97)
+    plt.subplots_adjust(left=0.07, right=0.81, top=0.88, bottom=0.12, wspace=0.22)
+
+    fig3_path = os.path.join(outdir, "penalty_comparison.png")
+    plt.savefig(fig3_path, dpi=300, bbox_inches="tight")
+    plt.close()
+    print(f"[OK] Saved figure: {fig3_path}")
+
+    # Also save with alternative intuitive name
+    fig3_alias = os.path.join(outdir, "four_point_defect_comparison.png")
+    import shutil
+    shutil.copyfile(fig3_path, fig3_alias)
+    print(f"[OK] Saved figure: {fig3_alias}")
 
 
 def update_raw_results(df: pd.DataFrame) -> None:
@@ -405,14 +557,20 @@ def update_raw_results(df: pd.DataFrame) -> None:
         ("FastME_SPR", "FastME-SPR"),
         ("AddNJ", "AddNJ (手法1: 縮約後欠損)"),
         ("AddNJ2", "AddNJ2 (手法1改善: 姉妹群整合度)"),
+        ("AddNJ3", "AddNJ3 (手法1改善2: 系統樹距離残差)"),
         ("NJ_Add_NNI", "NJ + Add-NNI (手法2)"),
         ("NJ_Add_SPR", "NJ + Add-SPR (手法2)"),
         ("NJ_Add_Hybrid", "NJ + Add-Hybrid (手法2)"),
+        ("NJ_Add_NNI2", "NJ + Add-NNI2 (手法2改善: 距離残差)"),
+        ("NJ_Add_SPR2", "NJ + Add-SPR2 (手法2改善: 距離残差)"),
+        ("NJ_Add_Hybrid2", "NJ + Add-Hybrid2 (手法2改善: 距離残差)"),
         ("BioNJ_Add_NNI", "BioNJ + Add-NNI"),
         ("BioNJ_Add_SPR", "BioNJ + Add-SPR"),
         ("BioNJ_Add_Hybrid", "BioNJ + Add-Hybrid"),
+        ("BioNJ_Add_Hybrid2", "BioNJ + Add-Hybrid2"),
         ("AddNJ_Add_Hybrid", "AddNJ + Add-Hybrid"),
         ("AddNJ2_Add_Hybrid", "AddNJ2 + Add-Hybrid"),
+        ("AddNJ3_Add_Hybrid2", "AddNJ3 + Add-Hybrid2"),
     ]
 
     divergences = sorted(df["divergence"].unique())
@@ -431,8 +589,21 @@ def update_raw_results(df: pd.DataFrame) -> None:
         avg_time = df[f"{m_col}_time"].mean()
         content += f"| **{m_label}** | {nrf_strs[0]} | {nrf_strs[1]} | {nrf_strs[2]} | {avg_time:.4f}s |\n"
 
+    content += "\n### 4点制約違反度 $\mathcal{L}(T; D_{\mathrm{obs}})$ 集計結果（平均 ± 標準誤差）\n\n"
+    content += "| 手法 | D = 0.5 (Penalty) | D = 1.0 (Penalty) | D = 2.0 (Penalty) |\n"
+    content += "| :--- | :---: | :---: | :---: |\n"
+
+    for m_col, m_label in methods:
+        pen_strs = []
+        for d in divergences:
+            sub = df[df["divergence"] == d][f"{m_col}_penalty"]
+            m_val = sub.mean()
+            s_val = sub.sem()
+            pen_strs.append(f"{m_val:.6f} ± {s_val:.6f}")
+        content += f"| **{m_label}** | {pen_strs[0]} | {pen_strs[1]} | {pen_strs[2]} |\n"
+
     content += "\n### 全レプリケート生データ (抜粋: 各条件最初の3反復)\n\n"
-    content += "| Rep | Div | Standard NJ | BioNJ | FastME-SPR | AddNJ | AddNJ2 | NJ+Add-Hyb | BioNJ+Add-Hyb | AddNJ2+Add-Hyb |\n"
+    content += "| Rep | Div | Standard NJ | BioNJ | FastME-SPR | AddNJ2 | AddNJ3 | NJ+Add-Hyb | NJ+Add-Hyb2 | BioNJ+Add-Hyb2 |\n"
     content += "| :-: | :-: | :---: | :---: | :---: | :---: | :---: | :---: | :---: | :---: |\n"
 
     for d in divergences:
@@ -441,8 +612,8 @@ def update_raw_results(df: pd.DataFrame) -> None:
             content += (
                 f"| {int(r['replicate'])} | {r['divergence']:.1f} | "
                 f"{r['Standard_NJ_nrf']:.3f} | {r['BioNJ_nrf']:.3f} | {r['FastME_SPR_nrf']:.3f} | "
-                f"{r['AddNJ_nrf']:.3f} | {r['AddNJ2_nrf']:.3f} | {r['NJ_Add_Hybrid_nrf']:.3f} | "
-                f"{r['BioNJ_Add_Hybrid_nrf']:.3f} | {r['AddNJ2_Add_Hybrid_nrf']:.3f} |\n"
+                f"{r['AddNJ2_nrf']:.3f} | {r['AddNJ3_nrf']:.3f} | {r['NJ_Add_Hybrid_nrf']:.3f} | "
+                f"{r['NJ_Add_Hybrid2_nrf']:.3f} | {r['BioNJ_Add_Hybrid2_nrf']:.3f} |\n"
             )
 
     with open("RawResults.md", "a") as f:

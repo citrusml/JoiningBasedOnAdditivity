@@ -1,3 +1,22 @@
+最終更新: 2026-11-18 06:53
+
+## 📈 進捗状況
+- [x] 完了: `benchmark_bioperl_nelsi.py` への `--lba-ratios`（T1, TN 枝長倍率指定）および `--methods-set core`（共通8手法のみ実行）の拡張 (完了日: 11/18)
+- [x] 完了: NELSI LBA (`lba3`, `lba5`) 用 LSF ジョブ配列スクリプト `scripts/submit_lsf_nelsi_lba.sh`（420並列ジョブ＋自動CSV統合）の作成・検証 (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: `PhyloTree_Methods_Comparison` 準拠の NELSI 自己相関モデル上で長枝牽引（`lba3`: `lba_ratio=3.0`, `lba5`: `lba_ratio=5.0`）の影響を、$D \in \{0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0\}$、$L=500$、$\text{indel}=0.1$、$N \in \{20, 32, 64\}$、50反復、共通8手法（`MSA_ML`, `SSS_Linear_NJ`, `SSS_Log_NJ`, `Poisson_NJ`, `MSA_NJ`, `GS_Poisson`, `GS_SSS_Linear`, `GS_SSS_Log`）について LSF スパコン上で並列実行する必要があった。
+- **[解決策]**:
+  1. `benchmark_bioperl_nelsi.py` に `--lba-ratios` と `--methods-set {all,core}` を追加。`lba_ratio > 1.0` の場合は伸長対象の `(T1, TN)` を固定 LBA ペアとして評価するよう設定。
+  2. `scripts/submit_lsf_nelsi_lba.sh` を作成（`#BSUB -J nelsi_lba[1-420]`, `#BSUB -q mafft`, `logs/nelsi_lba_bsub_%I.out/.err` + `logs/nelsi_lba*.log` リアルタイム出力 + 完了後の自動依存マージジョブ `nelsi_lba_merge`）。
+  3. 1反復スモークテスト（`lba3`, `lba5`, `N=20`, `D=1.0`, `core` 8手法 = 16行）を実行し、正常出力を確認。
+- **[パラメータ]**: `nelsi_kishino` (`v=0.3`, `scale_mode=root_to_tip`), `lba_ratio` $\in \{3.0, 5.0\}$, $D \in \{0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0\}$, $N \in \{20, 32, 64\}$, $L=500$, `indel=0.1`, 50 reps, 420 LSF jobs.
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン上で `bash scripts/submit_lsf_nelsi_lba.sh` を実行し、`results_nelsi_lba/benchmark_results.csv` および `summary_by_condition.csv` を取得する
+
+---
+
 最終更新: 2026-11-18 05:49
 
 ## 📈 進捗状況

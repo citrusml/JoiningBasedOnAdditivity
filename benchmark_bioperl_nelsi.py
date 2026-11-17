@@ -202,39 +202,43 @@ def _evaluate_and_build_records(
     return records
 
 
-def run_single_replicate(task: Tuple[str, int, float, int, int, float, int, int]) -> List[Dict[str, Any]]:
+def run_single_replicate(task: Tuple[str, int, float, float, int, int, float, int, int, str]) -> List[Dict[str, Any]]:
     """
     Executes one complete simulation and reconstruction replicate across all methods.
 
     Parameters
     ----------
-    task : Tuple[str, int, float, int, int, float, int, int]
-        Tuple `(tree_model, n_taxa, divergence, rep, seq_length, indel_rate, base_seed, max_iter_search)`.
+    task : Tuple[str, int, float, float, int, int, float, int, int, str]
+        Tuple `(tree_model, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)`.
 
     Returns
     -------
     List[Dict[str, Any]]
         List of evaluation records (one per method).
     """
-    tree_model, n_taxa, divergence, rep, seq_length, indel_rate, base_seed, max_iter_search = task
+    tree_model, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set = task
     model_offset = 0 if tree_model == "bioperl" else 500000
-    rep_seed = base_seed + model_offset + n_taxa * 10000 + int(round(divergence * 1000)) + rep
+    lba_offset = int(round(lba_ratio * 100000))
+    rep_seed = base_seed + model_offset + lba_offset + n_taxa * 10000 + int(round(divergence * 1000)) + rep
 
     # 1. Generate synthetic true tree
     if tree_model == "bioperl":
         root, taxa_names = generate_backward_yule_tree(
-            n_taxa=n_taxa, divergence=divergence, seed=rep_seed
+            n_taxa=n_taxa, divergence=divergence, seed=rep_seed, lba_ratio=lba_ratio
         )
     elif tree_model == "nelsi":
         root, taxa_names = generate_nelsi_tree(
-            n_taxa=n_taxa, divergence=divergence, seed=rep_seed
+            n_taxa=n_taxa, divergence=divergence, seed=rep_seed, lba_ratio=lba_ratio
         )
     else:
         raise ValueError(f"Unsupported tree_model '{tree_model}'.")
 
     true_newick = root.to_newick() + ";"
     D_true = compute_patristic_distance_matrix(root, taxa_names)
-    lba_pair = find_max_distance_pair(true_newick, taxa_names, D_true=D_true)
+    if lba_ratio > 1.0:
+        lba_pair = (taxa_names[0], taxa_names[-1])
+    else:
+        lba_pair = find_max_distance_pair(true_newick, taxa_names, D_true=D_true)
     true_rtt = compute_root_to_tip_metrics(true_newick, taxa_names, use_midpoint_rooting=False)
 
     # 2. Simulate WAG+Gamma sequences with Zipfian indels (INDELible)
@@ -304,47 +308,49 @@ def run_single_replicate(task: Tuple[str, int, float, int, int, float, int, int]
     gs_log_nwk = _fit_gs_branch_lengths(gs_log_raw, D_sss_log, taxa_names)
     method_entries.append(("GS_SSS_Log", gs_log_nwk, "sss_log", D_sss_log, time.time() - t0))
 
-    # --- Additional SSS Linear Methods ---
-    # 9) SSS Linear BioNJ
-    t0 = time.time()
-    sss_lin_bionj_nwk = run_fastme(D_sss_linear, taxa_names, method="bionj")
-    method_entries.append(("SSS_Linear_BioNJ", sss_lin_bionj_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+    # --- Additional SSS Linear Methods (only when methods_set == "all") ---
+    if methods_set == "all":
+        # 9) SSS Linear BioNJ
+        t0 = time.time()
+        sss_lin_bionj_nwk = run_fastme(D_sss_linear, taxa_names, method="bionj")
+        method_entries.append(("SSS_Linear_BioNJ", sss_lin_bionj_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
-    # 10) SSS Linear FastME (NNI)
-    t0 = time.time()
-    sss_lin_fnni_nwk = run_fastme(D_sss_linear, taxa_names, method="nni")
-    method_entries.append(("SSS_Linear_FastME_NNI", sss_lin_fnni_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+        # 10) SSS Linear FastME (NNI)
+        t0 = time.time()
+        sss_lin_fnni_nwk = run_fastme(D_sss_linear, taxa_names, method="nni")
+        method_entries.append(("SSS_Linear_FastME_NNI", sss_lin_fnni_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
-    # 11) SSS Linear AddNJ3
-    t0 = time.time()
-    sss_lin_addnj3_nwk = add_nj3(D_sss_linear, taxa_names)
-    method_entries.append(("SSS_Linear_AddNJ3", sss_lin_addnj3_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+        # 11) SSS Linear AddNJ3
+        t0 = time.time()
+        sss_lin_addnj3_nwk = add_nj3(D_sss_linear, taxa_names)
+        method_entries.append(("SSS_Linear_AddNJ3", sss_lin_addnj3_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
-    dist_scorer = TreeDistanceScorer(D_sss_linear, taxa_names, mode="ols_rmse")
+        dist_scorer = TreeDistanceScorer(D_sss_linear, taxa_names, mode="ols_rmse")
 
-    # 12) SSS Linear Standard NJ + Add-Hybrid2
-    t0 = time.time()
-    sss_lin_nj_hyb2_nwk, _ = hill_climb_search(
-        sss_lin_nj_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
-    )
-    method_entries.append(("SSS_Linear_NJ_AddHybrid2", sss_lin_nj_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+        # 12) SSS Linear Standard NJ + Add-Hybrid2
+        t0 = time.time()
+        sss_lin_nj_hyb2_nwk, _ = hill_climb_search(
+            sss_lin_nj_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
+        )
+        method_entries.append(("SSS_Linear_NJ_AddHybrid2", sss_lin_nj_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
-    # 13) SSS Linear BioNJ + Add-Hybrid2
-    t0 = time.time()
-    sss_lin_bionj_hyb2_nwk, _ = hill_climb_search(
-        sss_lin_bionj_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
-    )
-    method_entries.append(("SSS_Linear_BioNJ_AddHybrid2", sss_lin_bionj_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+        # 13) SSS Linear BioNJ + Add-Hybrid2
+        t0 = time.time()
+        sss_lin_bionj_hyb2_nwk, _ = hill_climb_search(
+            sss_lin_bionj_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
+        )
+        method_entries.append(("SSS_Linear_BioNJ_AddHybrid2", sss_lin_bionj_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
-    # 14) SSS Linear AddNJ3 + Add-Hybrid2
-    t0 = time.time()
-    sss_lin_addnj3_hyb2_nwk, _ = hill_climb_search(
-        sss_lin_addnj3_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
-    )
-    method_entries.append(("SSS_Linear_AddNJ3_AddHybrid2", sss_lin_addnj3_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
+        # 14) SSS Linear AddNJ3 + Add-Hybrid2
+        t0 = time.time()
+        sss_lin_addnj3_hyb2_nwk, _ = hill_climb_search(
+            sss_lin_addnj3_nwk, dist_scorer, mode="hybrid", max_iter=max_iter_search
+        )
+        method_entries.append(("SSS_Linear_AddNJ3_AddHybrid2", sss_lin_addnj3_hyb2_nwk, "sss_linear", D_sss_linear, time.time() - t0))
 
     meta = {
         "tree_model": tree_model,
+        "lba_ratio": lba_ratio,
         "n_taxa": n_taxa,
         "divergence": divergence,
         "seq_length": seq_length,
@@ -370,21 +376,24 @@ def build_task_list(
     tree_models: List[str],
     taxa_list: List[int],
     divergences: List[float],
+    lba_ratios: List[float],
     replicates: int,
     seq_length: int,
     indel_rate: float,
     base_seed: int,
     max_iter_search: int,
-) -> List[Tuple[str, int, float, int, int, float, int, int]]:
+    methods_set: str,
+) -> List[Tuple[str, int, float, float, int, int, float, int, int, str]]:
     """Builds the ordered list of all simulation replicate tasks."""
-    tasks: List[Tuple[str, int, float, int, int, float, int, int]] = []
+    tasks: List[Tuple[str, int, float, float, int, int, float, int, int, str]] = []
     for tm in tree_models:
-        for n_taxa in taxa_list:
-            for div in divergences:
-                for rep in range(1, replicates + 1):
-                    tasks.append(
-                        (tm, n_taxa, div, rep, seq_length, indel_rate, base_seed, max_iter_search)
-                    )
+        for lba_r in lba_ratios:
+            for n_taxa in taxa_list:
+                for div in divergences:
+                    for rep in range(1, replicates + 1):
+                        tasks.append(
+                            (tm, n_taxa, div, lba_r, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)
+                        )
     return tasks
 
 
@@ -413,6 +422,20 @@ def main() -> None:
         nargs="+",
         default=[0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0],
         help="Divergence scales D (default: 0.1 0.2 0.5 1.0 1.5 2.0 3.0)",
+    )
+    parser.add_argument(
+        "--lba-ratios",
+        type=float,
+        nargs="+",
+        default=[1.0],
+        help="LBA terminal branch multipliers on T1 and TN (default: 1.0)",
+    )
+    parser.add_argument(
+        "--methods-set",
+        type=str,
+        default="all",
+        choices=["all", "core"],
+        help="Method set: 'core' (8 general methods) or 'all' (adds 6 sss_linear methods) (default: all)",
     )
     parser.add_argument(
         "--length",
@@ -492,8 +515,9 @@ def main() -> None:
         df_merged = pd.concat(dfs, ignore_index=True)
         out_csv = os.path.join(args.outdir, "benchmark_results.csv")
         df_merged.to_csv(out_csv, index=False)
+        group_cols = ["tree_model", "lba_ratio", "n_taxa", "divergence", "method"] if "lba_ratio" in df_merged.columns else ["tree_model", "n_taxa", "divergence", "method"]
         summary = (
-            df_merged.groupby(["tree_model", "n_taxa", "divergence", "method"], as_index=False)
+            df_merged.groupby(group_cols, as_index=False)
             .mean(numeric_only=True)
         )
         summary_csv = os.path.join(args.outdir, "summary_by_condition.csv")
@@ -506,22 +530,25 @@ def main() -> None:
         tree_models=args.tree_models,
         taxa_list=args.taxa,
         divergences=args.divergences,
+        lba_ratios=args.lba_ratios,
         replicates=args.replicates,
         seq_length=args.length,
         indel_rate=args.indel_rate,
         base_seed=args.seed,
         max_iter_search=args.max_iter_search,
+        methods_set=args.methods_set,
     )
 
     if args.num_shards > 1:
         os.makedirs(shards_dir, exist_ok=True)
         tasks = [t for i, t in enumerate(all_tasks) if i % args.num_shards == args.shard_idx]
         m_tag = "_".join(args.tree_models)
+        lba_tag = "_".join(str(x) for x in args.lba_ratios)
         t_tag = "_".join(str(x) for x in args.taxa)
         d_tag = "_".join(str(x) for x in args.divergences)
         out_csv = os.path.join(
             shards_dir,
-            f"shard_{m_tag}_N{t_tag}_D{d_tag}_s{args.shard_idx:03d}.csv",
+            f"shard_{m_tag}_LBA{lba_tag}_N{t_tag}_D{d_tag}_s{args.shard_idx:03d}.csv",
         )
     else:
         tasks = all_tasks
@@ -529,8 +556,8 @@ def main() -> None:
 
     print("=" * 80)
     print("BIOPERL VS. NELSI COMPREHENSIVE BENCHMARK")
-    print(f"Models: {args.tree_models} | Taxa: {args.taxa} | D: {args.divergences}")
-    print(f"L={args.length} aa | Indel={args.indel_rate} | Reps={args.replicates} | Threads={args.threads}")
+    print(f"Models: {args.tree_models} | LBA: {args.lba_ratios} | Taxa: {args.taxa} | D: {args.divergences}")
+    print(f"L={args.length} aa | Indel={args.indel_rate} | Reps={args.replicates} | Methods={args.methods_set} | Threads={args.threads}")
     print(f"Shard {args.shard_idx}/{args.num_shards}: executing {len(tasks)}/{len(all_tasks)} tasks")
     print("=" * 80)
 
@@ -545,13 +572,13 @@ def main() -> None:
                 recs = fut.result()
                 all_records.extend(recs)
                 print(
-                    f"[{done_cnt}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} rep={t[3]} completed"
+                    f"[{done_cnt}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed"
                 )
     else:
         for idx, t in enumerate(tasks, start=1):
             recs = run_single_replicate(t)
             all_records.extend(recs)
-            print(f"[{idx}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} rep={t[3]} completed")
+            print(f"[{idx}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed")
 
     df = pd.DataFrame(all_records)
     df.to_csv(out_csv, index=False)
@@ -559,7 +586,7 @@ def main() -> None:
 
     if args.num_shards == 1 and not df.empty:
         summary = (
-            df.groupby(["tree_model", "n_taxa", "divergence", "method"], as_index=False)
+            df.groupby(["tree_model", "lba_ratio", "n_taxa", "divergence", "method"], as_index=False)
             .mean(numeric_only=True)
         )
         summary_csv = os.path.join(args.outdir, "summary_by_condition.csv")

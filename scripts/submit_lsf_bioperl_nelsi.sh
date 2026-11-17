@@ -1,6 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # High-Parallelism LSF (bsub) Job Array Script: BioPerl vs. NELSI Benchmark
+# (Includes Automatic Post-Array CSV Merge Job)
 #
 # Evaluates:
 #   - Tree Models: bioperl, nelsi (2 models)
@@ -10,19 +11,16 @@
 #   - Indel Rate:  0.1 (INDELible Zipfian POW 1.7 50)
 #   - Replicates:  50 per condition (split into 10 shards -> 5 reps/job)
 #
-# Total LSF Array Jobs: 2 x 3 x 7 x 10 = 420 parallel jobs
+# Total LSF Array Jobs: 2 x 3 x 7 x 10 = 420 parallel jobs + 1 merge job
 #   - Jobs   1..210 : tree_model = bioperl
 #   - Jobs 211..420 : tree_model = nelsi
+#   - Merge job     : runs automatically after all 420 jobs complete
 #
-# Usage:
-#   mkdir -p logs
-#   bsub < scripts/submit_lsf_bioperl_nelsi.sh
+# Recommended Usage (submits 420-job array + dependent merge job):
+#   bash scripts/submit_lsf_bioperl_nelsi.sh
 #
-# To override replicates (e.g., 10):
-#   REPLICATES=10 bsub < scripts/submit_lsf_bioperl_nelsi.sh
-#
-# After all 420 jobs complete, merge all shards into final CSVs:
-#   python benchmark_bioperl_nelsi.py --merge-only --outdir results_bioperl_nelsi
+# Alternative (manual merge):
+#   bash scripts/submit_lsf_bioperl_nelsi.sh --merge
 # ==============================================================================
 
 #BSUB -J bioperl_nelsi[1-420]
@@ -34,17 +32,77 @@
 
 set -uo pipefail
 
-# Activate micromamba environment
+OUTDIR=${OUTDIR:-results_bioperl_nelsi}
+TOTAL_REPS=${REPLICATES:-50}
+SEQ_LEN=${SEQ_LENGTH:-500}
+INDEL_RATE=${INDEL_RATE:-0.1}
+
+# ------------------------------------------------------------------------------
+# Mode 1: Merge-only execution (called by dependent LSF job or manually)
+# ------------------------------------------------------------------------------
+if [ "${1:-}" = "--merge" ]; then
+    source ~/.bashrc 2>/dev/null || true
+    eval "$(micromamba shell hook --shell bash)" 2>/dev/null || true
+    micromamba activate phylomethod_env
+
+    cd "${LS_SUBCWD:-$(pwd)}"
+    echo "============================================================"
+    echo "Merging all shard CSVs in ${OUTDIR}/shards/ | Start: $(date)"
+    echo "============================================================"
+    python -u benchmark_bioperl_nelsi.py --merge-only --outdir "${OUTDIR}"
+    echo "Merge completed at $(date)"
+    exit 0
+fi
+
+# ------------------------------------------------------------------------------
+# Mode 2: Login-node launcher (submits array job + dependent merge job)
+# ------------------------------------------------------------------------------
+if [ -z "${LSB_JOBID:-}" ]; then
+    mkdir -p logs "${OUTDIR}/shards"
+    SCRIPT_PATH="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
+
+    echo "Submitting 420-job LSF array via ${SCRIPT_PATH}..."
+    SUBMIT_OUT=$(AUTO_MERGE_SUBMITTED=1 OUTDIR="${OUTDIR}" REPLICATES="${TOTAL_REPS}" SEQ_LENGTH="${SEQ_LEN}" INDEL_RATE="${INDEL_RATE}" bsub < "${SCRIPT_PATH}")
+    echo "${SUBMIT_OUT}"
+
+    ARRAY_JOBID=$(echo "${SUBMIT_OUT}" | sed -n 's/.*Job <\([0-9]*\)>.*/\1/p')
+    if [ -n "${ARRAY_JOBID}" ]; then
+        echo "Submitting dependent merge job waiting on done(${ARRAY_JOBID})..."
+        OUTDIR="${OUTDIR}" bsub \
+            -w "done(${ARRAY_JOBID})" \
+            -J "bioperl_nelsi_merge" \
+            -n 1 -M 4000 -W 01:00 \
+            -o "logs/bioperl_nelsi_merge_%J.out" \
+            -e "logs/bioperl_nelsi_merge_%J.err" \
+            "bash \"${SCRIPT_PATH}\" --merge"
+    else
+        echo "Warning: Could not parse array Job ID. Run 'bash ${SCRIPT_PATH} --merge' after jobs finish."
+    fi
+    exit 0
+fi
+
+# ------------------------------------------------------------------------------
+# Mode 3: LSF compute-node worker (executes one shard of one condition)
+# ------------------------------------------------------------------------------
 source ~/.bashrc 2>/dev/null || true
 eval "$(micromamba shell hook --shell bash)" 2>/dev/null || true
 micromamba activate phylomethod_env
 
-# Move to repository root directory
 cd "${LS_SUBCWD:-$(pwd)}"
-
 mkdir -p logs
 
-# Ensure INDELible v1.03 binary is compiled for this host OS/arch
+# Fallback auto-schedule merge job if user ran `bsub < scripts/submit_lsf_bioperl_nelsi.sh` directly
+if [ "${LSB_JOBINDEX:-0}" -eq 1 ] && [ "${AUTO_MERGE_SUBMITTED:-0}" != "1" ]; then
+    OUTDIR="${OUTDIR}" bsub \
+        -w "done(${LSB_JOBID})" \
+        -J "bioperl_nelsi_merge" \
+        -n 1 -M 4000 -W 01:00 \
+        -o "logs/bioperl_nelsi_merge_%J.out" \
+        -e "logs/bioperl_nelsi_merge_%J.err" \
+        "bash scripts/submit_lsf_bioperl_nelsi.sh --merge" >/dev/null 2>&1 || true
+fi
+
+# Ensure INDELible v1.03 binary is available and compiled for this host OS/arch
 bash scripts/install_indelible.sh
 
 MODEL_LIST=(bioperl nelsi)
@@ -56,11 +114,6 @@ N_DIV_OPTS=${#DIV_LIST[@]}       # 7
 N_COND_PER_MODEL=$(( N_TAXA_OPTS * N_DIV_OPTS ))  # 21
 N_SHARDS=10
 JOBS_PER_MODEL=$(( N_COND_PER_MODEL * N_SHARDS )) # 210
-
-TOTAL_REPS=${REPLICATES:-50}
-SEQ_LEN=${SEQ_LENGTH:-500}
-INDEL_RATE=${INDEL_RATE:-0.1}
-OUTDIR=${OUTDIR:-results_bioperl_nelsi}
 
 JOB_IDX=$(( ${LSB_JOBINDEX:-1} - 1 ))
 MODEL_IDX=$(( JOB_IDX / JOBS_PER_MODEL ))
@@ -76,7 +129,6 @@ N_TAXA=${TAXA_LIST[$TAXA_IDX]}
 DIV=${DIV_LIST[$DIV_IDX]}
 
 mkdir -p "${OUTDIR}/shards"
-
 export OMP_NUM_THREADS=1
 
 echo "============================================================"

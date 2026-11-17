@@ -1,7 +1,7 @@
 #!/bin/bash
 # ==============================================================================
 # High-Parallelism LSF (bsub) Job Array Script: BioPerl vs. NELSI Benchmark
-# (Includes Automatic Post-Array CSV Merge Job)
+# (Includes Automatic Post-Array CSV Merge Job & PhyloTree_Methods_Comparison Log Format)
 #
 # Evaluates:
 #   - Tree Models: bioperl, nelsi (2 models)
@@ -24,11 +24,12 @@
 # ==============================================================================
 
 #BSUB -J bioperl_nelsi[1-420]
+#BSUB -q mafft
 #BSUB -n 1
 #BSUB -M 4000
 #BSUB -W 04:00
-#BSUB -o logs/bioperl_nelsi_%J_%I.out
-#BSUB -e logs/bioperl_nelsi_%J_%I.err
+#BSUB -o logs/bioperl_nelsi_bsub_%I.out  # BSUBジョブ自体のstdoutを記録（OOMなど診断に必須）
+#BSUB -e logs/bioperl_nelsi_bsub_%I.err  # BSUBジョブ自体のstderrを記録
 
 set -uo pipefail
 
@@ -37,21 +38,27 @@ TOTAL_REPS=${REPLICATES:-50}
 SEQ_LEN=${SEQ_LENGTH:-500}
 INDEL_RATE=${INDEL_RATE:-0.1}
 
+_activate_env() {
+    export PATH="$HOME/bin:$PATH"
+    eval "$(micromamba shell hook --shell bash)" 2>/dev/null || true
+    micromamba activate phylomethod_env
+    export PATH="${CONDA_PREFIX:-}:$CONDA_PREFIX/bin:$HOME/bin:$PATH"
+    export NELSI_RSCRIPT="${NELSI_RSCRIPT:-${MAMBA_ROOT_PREFIX:-$HOME/.micromamba}/envs/nelsi_env/bin/Rscript}"
+}
+
 # ------------------------------------------------------------------------------
 # Mode 1: Merge-only execution (called by dependent LSF job or manually)
 # ------------------------------------------------------------------------------
 if [ "${1:-}" = "--merge" ]; then
-    source ~/.bashrc 2>/dev/null || true
-    eval "$(micromamba shell hook --shell bash)" 2>/dev/null || true
-    micromamba activate phylomethod_env
-
+    _activate_env
     cd "${LS_SUBCWD:-$(pwd)}"
-    echo "============================================================"
-    echo "Merging all shard CSVs in ${OUTDIR}/shards/ | Start: $(date)"
-    echo "============================================================"
-    python -u benchmark_bioperl_nelsi.py --merge-only --outdir "${OUTDIR}"
-    echo "Merge completed at $(date)"
-    exit 0
+    mkdir -p logs
+    {
+        echo "=== Merging all shard CSVs in ${OUTDIR}/shards/ | Start: $(date) ==="
+        python -u benchmark_bioperl_nelsi.py --merge-only --outdir "${OUTDIR}"
+        echo "=== Merge completed at $(date) ==="
+    } > logs/bioperl_nelsi_merge.log 2>&1
+    exit $?
 fi
 
 # ------------------------------------------------------------------------------
@@ -71,9 +78,10 @@ if [ -z "${LSB_JOBID:-}" ]; then
         OUTDIR="${OUTDIR}" bsub \
             -w "done(${ARRAY_JOBID})" \
             -J "bioperl_nelsi_merge" \
+            -q mafft \
             -n 1 -M 4000 -W 01:00 \
-            -o "logs/bioperl_nelsi_merge_%J.out" \
-            -e "logs/bioperl_nelsi_merge_%J.err" \
+            -o "logs/bioperl_nelsi_merge_bsub.out" \
+            -e "logs/bioperl_nelsi_merge_bsub.err" \
             "bash \"${SCRIPT_PATH}\" --merge"
     else
         echo "Warning: Could not parse array Job ID. Run 'bash ${SCRIPT_PATH} --merge' after jobs finish."
@@ -84,21 +92,20 @@ fi
 # ------------------------------------------------------------------------------
 # Mode 3: LSF compute-node worker (executes one shard of one condition)
 # ------------------------------------------------------------------------------
-source ~/.bashrc 2>/dev/null || true
-eval "$(micromamba shell hook --shell bash)" 2>/dev/null || true
-micromamba activate phylomethod_env
+_activate_env
 
 cd "${LS_SUBCWD:-$(pwd)}"
-mkdir -p logs
+mkdir -p logs "${OUTDIR}/shards"
 
 # Fallback auto-schedule merge job if user ran `bsub < scripts/submit_lsf_bioperl_nelsi.sh` directly
 if [ "${LSB_JOBINDEX:-0}" -eq 1 ] && [ "${AUTO_MERGE_SUBMITTED:-0}" != "1" ]; then
     OUTDIR="${OUTDIR}" bsub \
         -w "done(${LSB_JOBID})" \
         -J "bioperl_nelsi_merge" \
+        -q mafft \
         -n 1 -M 4000 -W 01:00 \
-        -o "logs/bioperl_nelsi_merge_%J.out" \
-        -e "logs/bioperl_nelsi_merge_%J.err" \
+        -o "logs/bioperl_nelsi_merge_bsub.out" \
+        -e "logs/bioperl_nelsi_merge_bsub.err" \
         "bash scripts/submit_lsf_bioperl_nelsi.sh --merge" >/dev/null 2>&1 || true
 fi
 
@@ -128,29 +135,22 @@ TREE_MODEL=${MODEL_LIST[$MODEL_IDX]}
 N_TAXA=${TAXA_LIST[$TAXA_IDX]}
 DIV=${DIV_LIST[$DIV_IDX]}
 
-mkdir -p "${OUTDIR}/shards"
 export OMP_NUM_THREADS=1
+LOG_FILE="logs/bioperl_nelsi_${TREE_MODEL}_N${N_TAXA}_D${DIV}_s${SHARD_IDX}.log"
 
-echo "============================================================"
-echo "LSF Job Array Index ${LSB_JOBINDEX:-1}/420 | Host: $(hostname)"
-echo "Model: ${TREE_MODEL} | N=${N_TAXA} | D=${DIV} | L=${SEQ_LEN} | Indel=${INDEL_RATE}"
-echo "Shard: ${SHARD_IDX}/${N_SHARDS} (of ${TOTAL_REPS} reps) | Outdir: ${OUTDIR}"
-echo "Start Time: $(date)"
-echo "============================================================"
-
-python -u benchmark_bioperl_nelsi.py \
-  --tree-models "${TREE_MODEL}" \
-  --taxa "${N_TAXA}" \
-  --divergences "${DIV}" \
-  --length "${SEQ_LEN}" \
-  --indel-rate "${INDEL_RATE}" \
-  --replicates "${TOTAL_REPS}" \
-  --shard-idx "${SHARD_IDX}" \
-  --num-shards "${N_SHARDS}" \
-  --threads 1 \
-  --outdir "${OUTDIR}"
-
-echo "============================================================"
-echo "Finished LSF Job ${LSB_JOBINDEX:-1}: ${TREE_MODEL}, N=${N_TAXA}, D=${DIV}, Shard=${SHARD_IDX}"
-echo "End Time: $(date)"
-echo "============================================================"
+# リアルタイムに進捗ログを出力して実行 (いつでも tail -f logs/bioperl_nelsi_*.log で確認可能)
+{
+    echo "=== Running ${TREE_MODEL} N=${N_TAXA}, D=${DIV}, L=${SEQ_LEN}, Indel=${INDEL_RATE}, Shard=${SHARD_IDX}/${N_SHARDS} | Host: $(hostname) | Start: $(date) ==="
+    python -u benchmark_bioperl_nelsi.py \
+      --tree-models "${TREE_MODEL}" \
+      --taxa "${N_TAXA}" \
+      --divergences "${DIV}" \
+      --length "${SEQ_LEN}" \
+      --indel-rate "${INDEL_RATE}" \
+      --replicates "${TOTAL_REPS}" \
+      --shard-idx "${SHARD_IDX}" \
+      --num-shards "${N_SHARDS}" \
+      --threads 1 \
+      --outdir "${OUTDIR}"
+    echo "=== Finished ${TREE_MODEL} N=${N_TAXA}, D=${DIV}, Shard=${SHARD_IDX} | End: $(date) ==="
+} > "${LOG_FILE}" 2>&1

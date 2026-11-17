@@ -502,9 +502,23 @@ def generate_nelsi_tree(
             "NELSI R generator script 'generate_tree_nelsi.R' not found in src/, bin/, or ../PhyloTree_Methods_Comparison/bin/."
         )
 
-    rscript_bin = shutil.which("Rscript")
+    rscript_candidates = [
+        os.environ.get("NELSI_RSCRIPT"),
+        os.path.join(
+            os.environ.get("MAMBA_ROOT_PREFIX", os.path.expanduser("~/.micromamba")),
+            "envs",
+            "nelsi_env",
+            "bin",
+            "Rscript",
+        ),
+        shutil.which("Rscript"),
+    ]
+    rscript_bin = next(
+        (p for p in rscript_candidates if p and os.path.isfile(p) and os.access(p, os.X_OK)),
+        None,
+    )
     if rscript_bin is None:
-        raise RuntimeError("Rscript executable not found in PATH.")
+        raise RuntimeError("Rscript executable (NELSI_RSCRIPT or PATH Rscript) not found.")
 
     fd, target_path = tempfile.mkstemp(suffix=".nwk")
     os.close(fd)

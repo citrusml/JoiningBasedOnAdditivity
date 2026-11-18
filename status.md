@@ -1,3 +1,23 @@
+最終更新: 2026-11-18 10:50
+
+## 📈 進捗状況
+- [x] 完了: `benchmark_bioperl_nelsi.py` へのレジューム機能（`--skip-existing` ＋ 1反復ごとのアトミックチェックポイント保存）およびマージ時重複排除の実装 (完了日: 11/18)
+- [x] 完了: `scripts/submit_lsf_bioperl_nelsi.sh` および `scripts/submit_lsf_nelsi_lba.sh` への `--skip-existing` 標準適用・動作検証 (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: LSF ジョブ配列は Nextflow (`-resume`) を使用していないため、途中停止後に同じスクリプトを再投入すると完了済みシャードや途中反復が最初から再計算されてしまう問題があった。
+- **[解決策]**:
+  1. `benchmark_bioperl_nelsi.py` に `_atomic_save_csv`（一時ファイル経由の `os.replace`）を導入し、1反復完了ごとにシャード CSV へ安全にチェックポイント保存するよう変更。
+  2. `--skip-existing` 指定時は既存シャード CSV から完了済み `(tree_model, n_taxa, divergence, lba_ratio, replicate)`（全手法が揃った試行）を自動判定し、未完了分のみを実行（全完了時は即時 `[SKIP]`）。
+  3. `--merge-only` 時に重複行を除去（`drop_duplicates(keep="last")`）するよう安全化。
+  4. 両 LSF スクリプトに `--skip-existing` を標準付与し、再投入だけで Nextflow `-resume` と同等の途中再開が可能になった。
+- **[パラメータ]**: `--skip-existing`, `expected_methods=8 (core) / 14 (all)`.
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン上で `bash scripts/submit_lsf_bioperl_nelsi.sh` および `bash scripts/submit_lsf_nelsi_lba.sh` を実行（途中停止時は同じコマンドを再実行するだけで自動レジューム）
+
+---
+
 最終更新: 2026-11-18 06:53
 
 ## 📈 進捗状況

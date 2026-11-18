@@ -496,7 +496,17 @@ def main() -> None:
         action="store_true",
         help="Merge shard CSV files under <outdir>/shards/ into benchmark_results.csv and summary_by_condition.csv",
     )
+    parser.add_argument(
+        "--skip-existing",
+        action="store_true",
+        help="Resume mode: skip replicates/shards already completed in the target CSV and checkpoint after each replicate",
+    )
     args = parser.parse_args()
+
+    def _atomic_save_csv(df_to_save: pd.DataFrame, target_path: str) -> None:
+        tmp_path = f"{target_path}.tmp.{os.getpid()}"
+        df_to_save.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, target_path)
 
     os.makedirs(args.outdir, exist_ok=True)
     shards_dir = os.path.join(args.outdir, "shards")
@@ -513,15 +523,22 @@ def main() -> None:
             raise FileNotFoundError(f"No shard CSV files found in: {shards_dir}")
         dfs = [pd.read_csv(f) for f in shard_files]
         df_merged = pd.concat(dfs, ignore_index=True)
+        dedup_cols = [
+            c
+            for c in ["tree_model", "lba_ratio", "n_taxa", "divergence", "replicate", "method"]
+            if c in df_merged.columns
+        ]
+        if dedup_cols:
+            df_merged = df_merged.drop_duplicates(subset=dedup_cols, keep="last")
         out_csv = os.path.join(args.outdir, "benchmark_results.csv")
-        df_merged.to_csv(out_csv, index=False)
+        _atomic_save_csv(df_merged, out_csv)
         group_cols = ["tree_model", "lba_ratio", "n_taxa", "divergence", "method"] if "lba_ratio" in df_merged.columns else ["tree_model", "n_taxa", "divergence", "method"]
         summary = (
             df_merged.groupby(group_cols, as_index=False)
             .mean(numeric_only=True)
         )
         summary_csv = os.path.join(args.outdir, "summary_by_condition.csv")
-        summary.to_csv(summary_csv, index=False)
+        _atomic_save_csv(summary, summary_csv)
         print(f"[OK] Merged {len(shard_files)} shards -> {out_csv} ({len(df_merged)} rows)")
         print(f"[OK] Saved condition-level summary -> {summary_csv}")
         return
@@ -554,14 +571,57 @@ def main() -> None:
         tasks = all_tasks
         out_csv = os.path.join(args.outdir, "benchmark_results.csv")
 
+    all_records: List[Dict[str, Any]] = []
+    expected_methods = 8 if args.methods_set == "core" else 14
+    total_shard_tasks = len(tasks)
+
+    if args.skip_existing and os.path.isfile(out_csv) and os.path.getsize(out_csv) > 0:
+        try:
+            df_existing = pd.read_csv(out_csv)
+            key_cols = ["tree_model", "n_taxa", "divergence", "lba_ratio", "replicate"]
+            if not df_existing.empty and all(c in df_existing.columns for c in key_cols):
+                completed_keys = set()
+                for key, grp in df_existing.groupby(key_cols):
+                    if grp["method"].nunique() >= expected_methods:
+                        completed_keys.add(
+                            (str(key[0]), int(key[1]), float(key[2]), float(key[3]), int(key[4]))
+                        )
+                if completed_keys:
+                    keep_mask = df_existing.apply(
+                        lambda r: (
+                            str(r["tree_model"]),
+                            int(r["n_taxa"]),
+                            float(r["divergence"]),
+                            float(r["lba_ratio"]),
+                            int(r["replicate"]),
+                        )
+                        in completed_keys,
+                        axis=1,
+                    )
+                    all_records = df_existing[keep_mask].to_dict(orient="records")
+                    tasks = [
+                        t
+                        for t in tasks
+                        if (t[0], t[1], float(t[2]), float(t[3]), t[4]) not in completed_keys
+                    ]
+                    print(
+                        f"[RESUME] Found {len(completed_keys)} completed replicates in {out_csv}; "
+                        f"{len(tasks)}/{total_shard_tasks} remaining."
+                    )
+        except Exception as exc:
+            print(f"[WARN] Could not parse existing {out_csv} ({exc}); recomputing shard.")
+
+    if not tasks:
+        print(f"[SKIP] All {total_shard_tasks} tasks already completed in {out_csv}.")
+        return
+
     print("=" * 80)
     print("BIOPERL VS. NELSI COMPREHENSIVE BENCHMARK")
     print(f"Models: {args.tree_models} | LBA: {args.lba_ratios} | Taxa: {args.taxa} | D: {args.divergences}")
     print(f"L={args.length} aa | Indel={args.indel_rate} | Reps={args.replicates} | Methods={args.methods_set} | Threads={args.threads}")
-    print(f"Shard {args.shard_idx}/{args.num_shards}: executing {len(tasks)}/{len(all_tasks)} tasks")
+    print(f"Shard {args.shard_idx}/{args.num_shards}: executing {len(tasks)}/{total_shard_tasks} tasks")
     print("=" * 80)
 
-    all_records: List[Dict[str, Any]] = []
     if args.threads > 1 and len(tasks) > 1:
         with concurrent.futures.ProcessPoolExecutor(max_workers=args.threads) as ex:
             future_to_task = {ex.submit(run_single_replicate, t): t for t in tasks}
@@ -571,6 +631,7 @@ def main() -> None:
                 t = future_to_task[fut]
                 recs = fut.result()
                 all_records.extend(recs)
+                _atomic_save_csv(pd.DataFrame(all_records), out_csv)
                 print(
                     f"[{done_cnt}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed"
                 )
@@ -578,10 +639,11 @@ def main() -> None:
         for idx, t in enumerate(tasks, start=1):
             recs = run_single_replicate(t)
             all_records.extend(recs)
+            _atomic_save_csv(pd.DataFrame(all_records), out_csv)
             print(f"[{idx}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed")
 
     df = pd.DataFrame(all_records)
-    df.to_csv(out_csv, index=False)
+    _atomic_save_csv(df, out_csv)
     print(f"\n[OK] Saved results to: {out_csv} ({len(df)} rows)")
 
     if args.num_shards == 1 and not df.empty:

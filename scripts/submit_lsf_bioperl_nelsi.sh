@@ -151,6 +151,7 @@ LOG_FILE="logs/bioperl_nelsi_${TREE_MODEL}_N${N_TAXA}_D${DIV}_s${SHARD_IDX}.log"
       --shard-idx "${SHARD_IDX}" \
       --num-shards "${N_SHARDS}" \
       --threads 1 \
+      --skip-existing \
       --outdir "${OUTDIR}"
     echo "=== Finished ${TREE_MODEL} N=${N_TAXA}, D=${DIV}, Shard=${SHARD_IDX} | End: $(date) ==="
 } > "${LOG_FILE}" 2>&1

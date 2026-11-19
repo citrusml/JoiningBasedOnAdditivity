@@ -32,6 +32,7 @@ def run_benchmark(
     divergences: List[float] = [0.5, 1.0, 2.0],
     replicates: int = 10,
     alpha: float = 1.0,
+    indel_rate: float = 0.0,
     outdir: str = "results",
     seed: int = 42,
 ) -> pd.DataFrame:
@@ -50,6 +51,8 @@ def run_benchmark(
         Number of replicates per divergence level (unitless).
     alpha : float, default=1.0
         Gamma shape parameter (unitless).
+    indel_rate : float, default=0.0
+        Insertion/deletion rate relative to substitution rate (unitless).
     outdir : str, default='results'
         Output directory for results (path).
     seed : int, default=42
@@ -68,7 +71,7 @@ def run_benchmark(
 
     print("=" * 80)
     print("PHYLOMETRICS BENCHMARK: ADDITIVITY-BASED METHODS VS BASELINES")
-    print(f"Taxa: {n_taxa} | Length: {seq_length} aa | Divergences: {divergences} | Replicates: {replicates}")
+    print(f"Taxa: {n_taxa} | Length: {seq_length} aa | Divergences: {divergences} | Replicates: {replicates} | Indel: {indel_rate}")
     print("=" * 80)
 
     total_runs = len(divergences) * replicates
@@ -93,6 +96,7 @@ def run_benchmark(
                 seq_length=seq_length,
                 alpha=alpha,
                 model=wag,
+                indel_rate=indel_rate,
                 seed=rep_seed + 1,
             )
 
@@ -371,17 +375,24 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
     ax1.set_title("(a) All Evaluated Methods (Full Scale)", fontsize=13, fontweight="bold", pad=10)
     ax1.set_xticks(x)
     ax1.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
-    ax1.set_ylim(-0.02, 0.85)
+    full_max = max(
+        (df[df["divergence"] == d][f"{m}_nrf"].mean() + df[df["divergence"] == d][f"{m}_nrf"].sem())
+        for m in methods
+        for d in divergences
+    )
+    ax1.set_ylim(-0.02, max(0.85, full_max * 1.08))
     for sep in [0.5, 1.5]:
         ax1.axvline(sep, color="gray", linestyle=":", alpha=0.3)
 
     # Panel 2: Zoomed-in scale for competitive methods (excluding naive AddNJ outlier, keeping same dodge positions)
     ax2.grid(True, linestyle="--", alpha=0.5)
+    comp_max = 0.0
     for idx, (m, lbl) in enumerate(zip(methods, labels)):
         if m == "AddNJ":
             continue
         means = [df[df["divergence"] == d][f"{m}_nrf"].mean() for d in divergences]
         sems = [df[df["divergence"] == d][f"{m}_nrf"].sem() for d in divergences]
+        comp_max = max(comp_max, max(m_val + s_val for m_val, s_val in zip(means, sems)))
         ax2.errorbar(
             x + dodge_offsets[idx],
             means,
@@ -404,7 +415,7 @@ def generate_plots(df: pd.DataFrame, outdir: str = "results") -> None:
     ax2.set_title("(b) Competitive Methods (Zoomed Scale)", fontsize=13, fontweight="bold", pad=10)
     ax2.set_xticks(x)
     ax2.set_xticklabels([f"D = {d}" for d in divergences], fontsize=11, fontweight="bold")
-    ax2.set_ylim(-0.005, 0.17)
+    ax2.set_ylim(-0.005, max(0.17, comp_max * 1.12))
     for sep in [0.5, 1.5]:
         ax2.axvline(sep, color="gray", linestyle=":", alpha=0.3)
 
@@ -628,8 +639,10 @@ if __name__ == "__main__":
     parser.add_argument("--divergences", type=float, nargs="+", default=[0.5, 1.0, 2.0], help="Divergences")
     parser.add_argument("--replicates", type=int, default=10, help="Replicates per divergence (default: 10)")
     parser.add_argument("--alpha", type=float, default=1.0, help="Gamma alpha (default: 1.0)")
+    parser.add_argument("--indel-rate", type=float, default=0.0, help="Indel rate relative to substitution rate (default: 0.0)")
     parser.add_argument("--outdir", type=str, default="results", help="Output directory")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--skip-raw-results", action="store_true", help="Do not append to RawResults.md")
 
     args = parser.parse_args()
 
@@ -639,10 +652,12 @@ if __name__ == "__main__":
         divergences=args.divergences,
         replicates=args.replicates,
         alpha=args.alpha,
+        indel_rate=args.indel_rate,
         outdir=args.outdir,
         seed=args.seed,
     )
 
     generate_plots(df, outdir=args.outdir)
-    update_raw_results(df)
+    if not args.skip_raw_results:
+        update_raw_results(df)
     print("\nBenchmark and reporting completed successfully!")

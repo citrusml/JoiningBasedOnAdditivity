@@ -450,12 +450,14 @@ def generate_nelsi_tree(
     model: str = "nelsi_kishino",
     v: float = 0.3,
     initial_rate: float = 1.0,
+    mean_log: float = 0.0,
+    sd_log: float = 0.5,
     scale_mode: str = "root_to_tip",
     lba_ratio: float = 1.0,
 ) -> Tuple[SimTreeNode, List[str]]:
     """
     Generates a synthetic phylogenetic tree with Yule topology and autocorrelated
-    branch lengths using the NELSI R package via `generate_tree_nelsi.R`.
+    or uncorrelated relaxed-clock branch lengths using the NELSI R package via `generate_tree_nelsi.R`.
 
     Parameters
     ----------
@@ -471,6 +473,10 @@ def generate_nelsi_tree(
         Autocorrelation variance parameter v [unitless].
     initial_rate : float, default=1.0
         Initial root substitution rate [substitutions/site/unit time].
+    mean_log : float, default=0.0
+        Uncorrelated lognormal mean.log parameter [unitless].
+    sd_log : float, default=0.5
+        Uncorrelated lognormal sd.log parameter [unitless].
     scale_mode : str, default="root_to_tip"
         Scaling mode ('root_to_tip', 'mean_branch', or 'raw') [unitless].
     lba_ratio : float, default=1.0
@@ -531,6 +537,8 @@ def generate_nelsi_tree(
         "--model", model,
         "--v", str(v),
         "--initial_rate", str(initial_rate),
+        "--mean_log", str(mean_log),
+        "--sd_log", str(sd_log),
         "--scale_mode", scale_mode,
         "--lba_ratio", str(lba_ratio),
         "--outtree", target_path,

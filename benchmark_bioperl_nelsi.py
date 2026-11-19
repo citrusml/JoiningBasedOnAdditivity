@@ -202,22 +202,22 @@ def _evaluate_and_build_records(
     return records
 
 
-def run_single_replicate(task: Tuple[str, int, float, float, int, int, float, int, int, str]) -> List[Dict[str, Any]]:
+def run_single_replicate(task: Tuple[str, float, int, float, float, int, int, float, int, int, str]) -> List[Dict[str, Any]]:
     """
     Executes one complete simulation and reconstruction replicate across all methods.
 
     Parameters
     ----------
-    task : Tuple[str, int, float, float, int, int, float, int, int, str]
-        Tuple `(tree_model, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)`.
+    task : Tuple[str, float, int, float, float, int, int, float, int, int, str]
+        Tuple `(tree_model, nelsi_v, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)`.
 
     Returns
     -------
     List[Dict[str, Any]]
         List of evaluation records (one per method).
     """
-    tree_model, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set = task
-    model_offset = 0 if tree_model == "bioperl" else 500000
+    tree_model, nelsi_v, n_taxa, divergence, lba_ratio, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set = task
+    model_offset = 0 if tree_model == "bioperl" else 500000 + int(round(nelsi_v * 1000)) * 1000
     lba_offset = int(round(lba_ratio * 100000))
     rep_seed = base_seed + model_offset + lba_offset + n_taxa * 10000 + int(round(divergence * 1000)) + rep
 
@@ -228,7 +228,7 @@ def run_single_replicate(task: Tuple[str, int, float, float, int, int, float, in
         )
     elif tree_model == "nelsi":
         root, taxa_names = generate_nelsi_tree(
-            n_taxa=n_taxa, divergence=divergence, seed=rep_seed, lba_ratio=lba_ratio
+            n_taxa=n_taxa, divergence=divergence, seed=rep_seed, v=nelsi_v, lba_ratio=lba_ratio
         )
     else:
         raise ValueError(f"Unsupported tree_model '{tree_model}'.")
@@ -350,6 +350,7 @@ def run_single_replicate(task: Tuple[str, int, float, float, int, int, float, in
 
     meta = {
         "tree_model": tree_model,
+        "nelsi_v": float(nelsi_v) if tree_model == "nelsi" else float("nan"),
         "lba_ratio": lba_ratio,
         "n_taxa": n_taxa,
         "divergence": divergence,
@@ -374,6 +375,7 @@ def run_single_replicate(task: Tuple[str, int, float, float, int, int, float, in
 
 def build_task_list(
     tree_models: List[str],
+    nelsi_v_list: List[float],
     taxa_list: List[int],
     divergences: List[float],
     lba_ratios: List[float],
@@ -383,17 +385,19 @@ def build_task_list(
     base_seed: int,
     max_iter_search: int,
     methods_set: str,
-) -> List[Tuple[str, int, float, float, int, int, float, int, int, str]]:
+) -> List[Tuple[str, float, int, float, float, int, int, float, int, int, str]]:
     """Builds the ordered list of all simulation replicate tasks."""
-    tasks: List[Tuple[str, int, float, float, int, int, float, int, int, str]] = []
+    tasks: List[Tuple[str, float, int, float, float, int, int, float, int, int, str]] = []
     for tm in tree_models:
-        for lba_r in lba_ratios:
-            for n_taxa in taxa_list:
-                for div in divergences:
-                    for rep in range(1, replicates + 1):
-                        tasks.append(
-                            (tm, n_taxa, div, lba_r, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)
-                        )
+        v_values = nelsi_v_list if tm == "nelsi" else [0.0]
+        for nv in v_values:
+            for lba_r in lba_ratios:
+                for n_taxa in taxa_list:
+                    for div in divergences:
+                        for rep in range(1, replicates + 1):
+                            tasks.append(
+                                (tm, float(nv), n_taxa, div, lba_r, rep, seq_length, indel_rate, base_seed, max_iter_search, methods_set)
+                            )
     return tasks
 
 
@@ -408,6 +412,13 @@ def main() -> None:
         default=["bioperl", "nelsi"],
         choices=["bioperl", "nelsi"],
         help="Tree simulation models (default: bioperl nelsi)",
+    )
+    parser.add_argument(
+        "--nelsi-v",
+        type=float,
+        nargs="+",
+        default=[0.3],
+        help="NELSI autocorrelation variance parameter v values (default: 0.3)",
     )
     parser.add_argument(
         "--taxa",
@@ -525,14 +536,18 @@ def main() -> None:
         df_merged = pd.concat(dfs, ignore_index=True)
         dedup_cols = [
             c
-            for c in ["tree_model", "lba_ratio", "n_taxa", "divergence", "replicate", "method"]
+            for c in ["tree_model", "nelsi_v", "indel_rate", "lba_ratio", "n_taxa", "divergence", "replicate", "method"]
             if c in df_merged.columns
         ]
         if dedup_cols:
             df_merged = df_merged.drop_duplicates(subset=dedup_cols, keep="last")
         out_csv = os.path.join(args.outdir, "benchmark_results.csv")
         _atomic_save_csv(df_merged, out_csv)
-        group_cols = ["tree_model", "lba_ratio", "n_taxa", "divergence", "method"] if "lba_ratio" in df_merged.columns else ["tree_model", "n_taxa", "divergence", "method"]
+        group_cols = [
+            c
+            for c in ["tree_model", "nelsi_v", "indel_rate", "lba_ratio", "n_taxa", "divergence", "method"]
+            if c in df_merged.columns
+        ]
         summary = (
             df_merged.groupby(group_cols, as_index=False)
             .mean(numeric_only=True)
@@ -545,6 +560,7 @@ def main() -> None:
 
     all_tasks = build_task_list(
         tree_models=args.tree_models,
+        nelsi_v_list=args.nelsi_v,
         taxa_list=args.taxa,
         divergences=args.divergences,
         lba_ratios=args.lba_ratios,
@@ -560,12 +576,13 @@ def main() -> None:
         os.makedirs(shards_dir, exist_ok=True)
         tasks = [t for i, t in enumerate(all_tasks) if i % args.num_shards == args.shard_idx]
         m_tag = "_".join(args.tree_models)
+        v_tag = "_".join(str(x) for x in args.nelsi_v)
         lba_tag = "_".join(str(x) for x in args.lba_ratios)
         t_tag = "_".join(str(x) for x in args.taxa)
         d_tag = "_".join(str(x) for x in args.divergences)
         out_csv = os.path.join(
             shards_dir,
-            f"shard_{m_tag}_LBA{lba_tag}_N{t_tag}_D{d_tag}_s{args.shard_idx:03d}.csv",
+            f"shard_{m_tag}_v{v_tag}_I{args.indel_rate}_LBA{lba_tag}_N{t_tag}_D{d_tag}_s{args.shard_idx:03d}.csv",
         )
     else:
         tasks = all_tasks
@@ -578,18 +595,20 @@ def main() -> None:
     if args.skip_existing and os.path.isfile(out_csv) and os.path.getsize(out_csv) > 0:
         try:
             df_existing = pd.read_csv(out_csv)
-            key_cols = ["tree_model", "n_taxa", "divergence", "lba_ratio", "replicate"]
+            key_cols = ["tree_model", "nelsi_v", "n_taxa", "divergence", "lba_ratio", "replicate"]
             if not df_existing.empty and all(c in df_existing.columns for c in key_cols):
                 completed_keys = set()
-                for key, grp in df_existing.groupby(key_cols):
+                for key, grp in df_existing.groupby(key_cols, dropna=False):
                     if grp["method"].nunique() >= expected_methods:
+                        nv_val = 0.0 if pd.isna(key[1]) else float(key[1])
                         completed_keys.add(
-                            (str(key[0]), int(key[1]), float(key[2]), float(key[3]), int(key[4]))
+                            (str(key[0]), nv_val, int(key[2]), float(key[3]), float(key[4]), int(key[5]))
                         )
                 if completed_keys:
                     keep_mask = df_existing.apply(
                         lambda r: (
                             str(r["tree_model"]),
+                            0.0 if pd.isna(r["nelsi_v"]) else float(r["nelsi_v"]),
                             int(r["n_taxa"]),
                             float(r["divergence"]),
                             float(r["lba_ratio"]),
@@ -602,7 +621,7 @@ def main() -> None:
                     tasks = [
                         t
                         for t in tasks
-                        if (t[0], t[1], float(t[2]), float(t[3]), t[4]) not in completed_keys
+                        if (t[0], float(t[1]), t[2], float(t[3]), float(t[4]), t[5]) not in completed_keys
                     ]
                     print(
                         f"[RESUME] Found {len(completed_keys)} completed replicates in {out_csv}; "

@@ -1,3 +1,69 @@
+最終更新: 2026-11-19 17:48
+
+## 📈 進捗状況
+- [x] 完了: `benchmark_bioperl_nelsi.py` に `--nelsi-v` 引数追加および出力CSV/シャード/重複排除の `nelsi_v` 対応 (完了日: 11/19)
+- [x] 完了: NELSI 相関モデル `v = 0.6, 1.0` 用の Nextflow + LSF パイプライン一式作成 (`main.nf`, `next_configs/nextflow_nelsi_v06_v10.config`, `run_scripts/run_nextflow_nelsi_v06_v10.sh`) (完了日: 11/19)
+
+## 🛠 技術的決定・メモ
+- **[設計]**: `PhyloTree_Methods_Comparison` の `main.nf` / `next_configs/nextflow_nelsi_yule.config` / `run_scripts/run_nextflow_nelsi_yule.sh` の構成に準拠し、Nextflow DSL2 (`-profile supercomputer -resume`) 経由で LSF (`queue = 'mafft'`) へジョブ投入・集約マージする構成とした。
+- **[パラメータ]**: `nelsi_v_list = [0.6, 1.0]`, `taxa_list = [20, 32, 64]`, `distances = [0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0]`, `length = 500`, `indel_rate = 0.1`, `replicates = 50`, `chunk_size = 5`（計 2 × 3 × 7 × 10 = 420 チャンク並列 + 1 マージジョブ）。
+
+## 🚀 次に行うこと (Next Actions)
+1. スパコン上で `bsub < run_scripts/run_nextflow_nelsi_v06_v10.sh` を実行し、`logs/nextflow_nelsi_v06_v10.log` で進捗を確認する。
+
+---
+
+最終更新: 2026-11-19 15:21
+
+## 📈 進捗状況
+- [x] 完了: NELSI 自己相関緩和時計モデル（`nelsi_kishino`, `N=32`, `D=1.0`, `seed=42`）において分散パラメータ `v` を `0.3` から `0.6, 1.0, 1.5, 2.0, 3.0` まで段階的に増加させた際の系統樹可視化スクリプト作成および樹形画像生成 (`analysis/plot_nelsi_variance_trees.py`, `results/nelsi_v_trees/`) (完了日: 11/19)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: 自己相関モデルの分散パラメータ `v`（デフォルト `0.3`）を大きくした際に、Root-to-Tip 距離の不均一性（分子時計からの逸脱・クレード単位の加速／減速）が樹形としてどう変化するかを視覚的に確認したい。
+- **[解決策]**: `seed=42` を固定して同一の Yule 樹形（`N=32`）上で `v in {0.3, 0.6, 1.0, 1.5, 2.0, 3.0}` の系統樹を生成し、厳密分子時計ライン（`D=1.0`）および各葉の Root-to-Tip 距離付きの矩形系統樹（300 DPI）を個別に描画した。
+- **[パラメータ]**: `n_taxa=32`, `divergence=1.0`, `seed=42`, `model=nelsi_kishino`, `scale_mode=root_to_tip`, `v=[0.3, 0.6, 1.0, 1.5, 2.0, 3.0]`（`Max/Min` 比は `1.79x` → `2.79x` → `5.41x` → `13.43x` → `35.26x` → `261.38x` と指数的に増大）。
+
+## 🚀 次に行うこと (Next Actions)
+1. 樹形変化を踏まえ、シミュレーション実験で検証したい `v` の範囲（例：`v=0.3, 0.6, 1.0, 1.5` 等）を決定する。
+
+---
+
+最終更新: 2026-11-18 13:13
+
+## 📈 進捗状況
+- [x] 完了: `main.py` に `--indel-rate`・`--skip-raw-results` 引数追加およびプロット縦軸の自動調整対応 (完了日: 11/18)
+- [x] 完了: `indel=0.1` 条件（`N=20, L=500 aa, D={0.5, 1.0, 2.0}, reps=10`）でのベンチマーク実行およびグラフ生成 (`results_indel01/`) (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[課題]**: `results/nrf_comparison.png` は `indel_rate=0.0` で生成されており、`indel=0.1` 条件では `D=2.0` の `nRF` が約 0.35–0.42 に上昇するため、従来の固定 `ylim(-0.005, 0.17)` ではズームパネルが切れていた。
+- **[解決策]**: `main.py` の `run_benchmark` に `indel_rate` 引数を追加し、`generate_plots` の `ax1`/`ax2` の `ylim` をデータ最大値に応じて自動拡張するよう修正して再描画した。
+- **[パラメータ]**: `n_taxa=20`, `seq_length=500`, `divergences=[0.5, 1.0, 2.0]`, `replicates=10`, `alpha=1.0`, `indel_rate=0.1`, `seed=42`（INDELible バイナリ: `PhyloTree_Methods_Comparison/bin/indelible`）。
+
+## 🚀 次に行うこと (Next Actions)
+1. `results_indel01/nrf_comparison.png` と `results/nrf_comparison.png` を比較し、indel 有無による各手法（NJ, BioNJ, FastME, AddNJ2/3, Add-Hybrid2 等）の頑健性差を評価する。
+
+---
+
+最終更新: 2026-11-18 12:32
+
+## 📈 進捗状況
+- [x] 完了: `results_lba2/benchmark_results.csv`（NELSI LBA3/LBA5, 16,800行, 欠損なし）の統計解析および集計CSV作成 (`results_lba2/summary_by_condition.csv`) (完了日: 11/18)
+- [x] 完了: `analysis/plot_lba2_results.py` による300 DPI論文品質グラフ6種の作成・視覚検証 (`results_lba2/plots/*.png`) (完了日: 11/18)
+
+## 🛠 技術的決定・メモ
+- **[解析結果概要]**:
+  - 全体トポロジー精度（`nRF`）は `MSA_ML` が最良（LBA3x: 0.1837, LBA5x: 0.1998）、次いで `MSA_NJ` / `Poisson_NJ` / `SSS_Linear_NJ` がほぼ同等（LBA3x: ~0.205–0.207, LBA5x: ~0.226–0.230）。
+  - `SSS_Log_NJ` は `D=1.0` 付近で `nRF` が急悪化（~0.436）し、同時に `matrix_rmse` / `patristic_rmse`（~4.3–5.0）および `root_dist_max_min_ratio` がスパイクする（対数補正による長枝距離発散と、極端な負の `NTA` = -0.3010 が対応）。
+  - `GS` 系（特に `GS_SSS_Linear`, `GS_Poisson`）は `NJ` 系に比べて全体 `nRF`・`lba_quartet_attraction`・`pair_nrf` が高く、LBA耐性で劣る一方、`GS_SSS_Log` は高発散域（`D >= 1.5`）において `SSS_Log_NJ` より低い `nRF` を示した。
+- **[可視化の工夫]**: `matrix_rmse` 等が `NaN` である `MSA_ML` も全図の凡例に含まれるよう全Axesから凡例を収集し、x軸は `0.1` と `0.2` の重なりを防ぐため等間隔離散目盛を採用した。
+- **[パラメータ]**: `tree_model=nelsi`, `lba_ratio={3.0, 5.0}`, `n_taxa={20, 32, 64}`, `divergence={0.1, 0.2, 0.5, 1.0, 1.5, 2.0, 3.0}`, `seq_length=500`, `indel_rate=0.1`, `rep=50`（計336条件 × 50反復 = 16,800行）。
+
+## 🚀 次に行うこと (Next Actions)
+1. 必要に応じて `SSS_Log` における `D=1.0` 付近の距離発散と `GS_SSS_Log` の挙動差を詳細調査する。
+2. 論文・発表資料向けに `results_lba2/plots/` の各図と `results_lba2/summary_by_condition.csv` を参照する。
+
+---
+
 最終更新: 2026-11-18 10:50
 
 ## 📈 進捗状況

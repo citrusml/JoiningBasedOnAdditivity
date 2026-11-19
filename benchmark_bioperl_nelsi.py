@@ -652,22 +652,27 @@ def main() -> None:
                 all_records.extend(recs)
                 _atomic_save_csv(pd.DataFrame(all_records), out_csv)
                 print(
-                    f"[{done_cnt}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed"
+                    f"[{done_cnt}/{len(tasks)}] model={t[0]} v={t[1]} N={t[2]} D={t[3]} LBA={t[4]} rep={t[5]} completed"
                 )
     else:
         for idx, t in enumerate(tasks, start=1):
             recs = run_single_replicate(t)
             all_records.extend(recs)
             _atomic_save_csv(pd.DataFrame(all_records), out_csv)
-            print(f"[{idx}/{len(tasks)}] model={t[0]} N={t[1]} D={t[2]} LBA={t[3]} rep={t[4]} completed")
+            print(f"[{idx}/{len(tasks)}] model={t[0]} v={t[1]} N={t[2]} D={t[3]} LBA={t[4]} rep={t[5]} completed")
 
     df = pd.DataFrame(all_records)
     _atomic_save_csv(df, out_csv)
     print(f"\n[OK] Saved results to: {out_csv} ({len(df)} rows)")
 
     if args.num_shards == 1 and not df.empty:
+        summary_cols = [
+            c
+            for c in ["tree_model", "nelsi_v", "indel_rate", "lba_ratio", "n_taxa", "divergence", "method"]
+            if c in df.columns
+        ]
         summary = (
-            df.groupby(["tree_model", "lba_ratio", "n_taxa", "divergence", "method"], as_index=False)
+            df.groupby(summary_cols, as_index=False)
             .mean(numeric_only=True)
         )
         summary_csv = os.path.join(args.outdir, "summary_by_condition.csv")

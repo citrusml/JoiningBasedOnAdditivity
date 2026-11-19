@@ -3,29 +3,23 @@ nextflow.enable.dsl=2
 /*
  * Nextflow DSL2 Pipeline for NELSI Autocorrelated Variance Benchmark
  *
- * JoiningBasedOnAdditivity の benchmark_bioperl_nelsi.py を Nextflow で並列実行し、
- * 各シャード結果を集約して benchmark_results.csv / summary_by_condition.csv を生成する。
+ * Taxa 数 (N=20/32, N=64, N=128) に応じて適切なマルチコアCPU・メモリ・実行時間を
+ * LSF ジョブへ割り当て、ProcessPoolExecutor (--threads ${task.cpus}) でチャンク内の
+ * レプリケートを並列実行する。
  *
  * Execution:
  *   nextflow run main.nf -c next_configs/nextflow_nelsi_v06_v10.config -profile supercomputer -resume
  */
 
-process RUN_NELSI_CHUNK {
-    tag "v=${nelsi_v}_ir=${indel_rate}_N=${n_taxa}_D=${divergence}_c=${chunk_idx}/${num_chunks}"
-    publishDir "${params.outdir}/shards", mode: 'copy', overwrite: true
-
-    input:
-    tuple val(nelsi_v), val(indel_rate), val(n_taxa), val(divergence), val(chunk_idx), val(num_chunks)
-
-    output:
-    path "shards/*.csv", emit: shard_csv
-
-    script:
-    def shard_idx = chunk_idx - 1
-    """
+def runChunkCmd(nelsi_v, indel_rate, n_taxa, divergence, chunk_idx, num_chunks, cpus) {
+    def shard_idx = (chunk_idx as int) - 1
+    return """
     ln -sfn "${projectDir}/src" src
     export PYTHONPATH="${projectDir}:\${PYTHONPATH:-}"
     export NELSI_RSCRIPT="\${NELSI_RSCRIPT:-\${MAMBA_ROOT_PREFIX:-\$HOME/.micromamba}/envs/nelsi_env/bin/Rscript}"
+    export OMP_NUM_THREADS=1
+    export OPENBLAS_NUM_THREADS=1
+    export MKL_NUM_THREADS=1
 
     python -u "${projectDir}/benchmark_bioperl_nelsi.py" \\
         --tree-models "${params.tree_model}" \\
@@ -37,7 +31,7 @@ process RUN_NELSI_CHUNK {
         --indel-rate ${indel_rate} \\
         --replicates ${params.replicates} \\
         --methods-set "${params.methods_set}" \\
-        --threads ${task.cpus} \\
+        --threads ${cpus} \\
         --max-iter-search ${params.max_iter_search} \\
         --shard-idx ${shard_idx} \\
         --num-shards ${num_chunks} \\
@@ -45,6 +39,48 @@ process RUN_NELSI_CHUNK {
         --outdir . \\
         --skip-existing
     """
+}
+
+process RUN_NELSI_SMALL {
+    tag "v=${nelsi_v}_ir=${indel_rate}_N=${n_taxa}_D=${divergence}_c=${chunk_idx}/${num_chunks}"
+    publishDir "${params.outdir}/shards", mode: 'copy', overwrite: true
+
+    input:
+    tuple val(nelsi_v), val(indel_rate), val(n_taxa), val(divergence), val(chunk_idx), val(num_chunks)
+
+    output:
+    path "shards/*.csv", emit: shard_csv
+
+    script:
+    runChunkCmd(nelsi_v, indel_rate, n_taxa, divergence, chunk_idx, num_chunks, task.cpus)
+}
+
+process RUN_NELSI_MEDIUM {
+    tag "v=${nelsi_v}_ir=${indel_rate}_N=${n_taxa}_D=${divergence}_c=${chunk_idx}/${num_chunks}"
+    publishDir "${params.outdir}/shards", mode: 'copy', overwrite: true
+
+    input:
+    tuple val(nelsi_v), val(indel_rate), val(n_taxa), val(divergence), val(chunk_idx), val(num_chunks)
+
+    output:
+    path "shards/*.csv", emit: shard_csv
+
+    script:
+    runChunkCmd(nelsi_v, indel_rate, n_taxa, divergence, chunk_idx, num_chunks, task.cpus)
+}
+
+process RUN_NELSI_LARGE {
+    tag "v=${nelsi_v}_ir=${indel_rate}_N=${n_taxa}_D=${divergence}_c=${chunk_idx}/${num_chunks}"
+    publishDir "${params.outdir}/shards", mode: 'copy', overwrite: true
+
+    input:
+    tuple val(nelsi_v), val(indel_rate), val(n_taxa), val(divergence), val(chunk_idx), val(num_chunks)
+
+    output:
+    path "shards/*.csv", emit: shard_csv
+
+    script:
+    runChunkCmd(nelsi_v, indel_rate, n_taxa, divergence, chunk_idx, num_chunks, task.cpus)
 }
 
 process MERGE_RESULTS {
@@ -91,8 +127,20 @@ workflow {
         .combine(ch_taxa)
         .combine(ch_dist)
         .combine(ch_chunks)
-        .map { nv, ir, nt, d, c_idx, n_chk -> tuple(nv, ir, nt, d, c_idx, n_chk) }
+        .map { nv, ir, nt, d, c_idx, n_chk -> tuple(nv, ir, nt as int, d, c_idx, n_chk) }
 
-    RUN_NELSI_CHUNK(ch_tasks)
-    MERGE_RESULTS(RUN_NELSI_CHUNK.out.shard_csv.collect())
+    ch_small  = ch_tasks.filter { it[2] <= 32 }
+    ch_medium = ch_tasks.filter { it[2] > 32 && it[2] <= 64 }
+    ch_large  = ch_tasks.filter { it[2] > 64 }
+
+    RUN_NELSI_SMALL(ch_small)
+    RUN_NELSI_MEDIUM(ch_medium)
+    RUN_NELSI_LARGE(ch_large)
+
+    ch_all_shards = RUN_NELSI_SMALL.out.shard_csv
+        .mix(RUN_NELSI_MEDIUM.out.shard_csv)
+        .mix(RUN_NELSI_LARGE.out.shard_csv)
+        .collect()
+
+    MERGE_RESULTS(ch_all_shards)
 }

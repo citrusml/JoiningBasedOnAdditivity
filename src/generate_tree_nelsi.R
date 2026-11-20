@@ -195,20 +195,30 @@ chronogram$edge.length <- chronogram$edge.length / root_height
 nelsi_params <- list(initial.rate = opts$initial_rate, v = opts$v)
 
 if (opts$model %in% c("nelsi_kishino", "kishino", "nelsi", "nelsi_yule")) {
-  sim_res <- NELSI::simulate.rate(chronogram, NELSI::simulate.autocor.kishino, params = nelsi_params)
   canonical_model <- "nelsi_kishino"
+  if (opts$v <= 0.0) {
+    phylogram <- chronogram
+  } else {
+    sim_res <- NELSI::simulate.rate(chronogram, NELSI::simulate.autocor.kishino, params = nelsi_params)
+    phylogram <- sim_res$phylogram
+  }
 } else if (opts$model %in% c("nelsi_thorne", "thorne")) {
-  sim_res <- NELSI::simulate.rate(chronogram, NELSI::simulate.autocor.thorne, params = nelsi_params)
   canonical_model <- "nelsi_thorne"
+  if (opts$v <= 0.0) {
+    phylogram <- chronogram
+  } else {
+    sim_res <- NELSI::simulate.rate(chronogram, NELSI::simulate.autocor.thorne, params = nelsi_params)
+    phylogram <- sim_res$phylogram
+  }
 } else if (opts$model %in% c("nelsi_uncor_lnorm", "uncor_lnorm", "ucln")) {
   uncor_params <- list(mean.log = opts$mean_log, sd.log = opts$sd_log)
   sim_res <- NELSI::simulate.rate(chronogram, NELSI::simulate.uncor.lnorm, params = uncor_params)
   canonical_model <- "nelsi_uncor_lnorm"
+  phylogram <- sim_res$phylogram
 } else {
   stop(sprintf("Unsupported NELSI model '%s'. Must be 'nelsi_kishino', 'nelsi_thorne', or 'nelsi_uncor_lnorm'.", opts$model))
 }
 
-phylogram <- sim_res$phylogram
 phylogram$node.label <- NULL
 phylogram$root.edge <- NULL
 
